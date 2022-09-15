@@ -8,14 +8,11 @@ Program () {
 	// Initialize classes
 	Base.Init(this); // Always init Base first!
 	ShipControl.Init(this, Base.GridBlocks);
-	//RoverControl.Init(this, Base.GridBlocks);
+	SimpleMissile.Init(this, Base.GridBlocks);
 	
 	// Change settings
-	Base.Title = "Ship Control";
-	Base.DisplayOutput(Base.GroupBlocks, "(Output)", 0);
-	Base.DisplayOutput(Base.GroupBlocks.OfType<IMyCockpit>(), surfaceId:0);
-	Echo("Output displays: " + Base.OutputDisplays.Count);
-	Base.SetLCDTheme(Base.GroupBlocks, Color.Yellow, Color.Black);
+	Base.Title = "Simple Missile";
+	Base.SetLCDTheme(Base.GroupBlocks, Color.Orange, Color.Black);
 	ShipControl.GyroMaxDelta = 0.1;
 	ShipControl.MaxShipSpeed = 100.0;
 	
@@ -28,37 +25,21 @@ Program () {
 //// EXECUTION ////
 void Main(string argument) {
 	try {
+
+		Base.Update(); // Always update Base first!
+		ShipControl.Update();
+		SimpleMissile.Update();
 		
-		if (argument == "") {
-			Base.Update(); // Always update Base first!
-			ShipControl.Update();
-			
-			ShipControl.CentripetalFlight(0.03, cancelGravity:CancelGravity);
-			//ShipControl.NormalFlight(0.01, cancelGravity:CancelGravity);
-			//ShipControl.ExperimentalFlight();
-			//RoverControl.Drive();
-			
-			// Call Base.ProcessorLoad last, anything after wont be taken into account.
-			Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
+		if (SimpleMissile.IsLaunched) {
+			ShipControl.CentripetalFlight(0.02);
 		}
+		
+		// Call Base.ProcessorLoad last, anything after wont be taken into account.
+		Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
 
-		else if (argument.Contains("SetSpeed")) {
-			ShipControl.MaxShipSpeed = double.Parse(argument.Split(':')[1]);
-		}
-
-		else if (argument == "SwitchMode") {
-			CancelGravity = !CancelGravity;
-		}
 	}
-	catch (System.Exception exception) {
-		Base.Throw(exception);
-	}
+	catch (System.Exception exception) { Base.Throw(exception); }
 }
-
-
-
-//// STATE ////
-bool CancelGravity = true;
 
 
 
@@ -718,21 +699,16 @@ static class ShipControl {
 	static Vector3D lastTargetFwd = Vector3D.Zero;
 	static Vector3D lastTargetUp = Vector3D.Zero;
 }
-static class RoverControl {
-	public static readonly DateTime Version = new DateTime(2022, 07, 20, 00, 00, 00);
-
-
-
-	//// PUBLIC SETTINGS ////
-	public static double MouseSensitivity = 0.03;
+static class SimpleMissile {
+	public static readonly DateTime Version = new DateTime(2022, 09, 14);
 
 
 
 	//// PUBLIC DATA ////
 	public static MyGridProgram Program;
-	public static IMyShipController Controller = null;
-	public static List<IMyMotorSuspension> Wheels = new List<IMyMotorSuspension>();
-	public static List<IMyRemoteControl> Remotes = new List<IMyRemoteControl>();
+	public static IMyRemoteControl Controller = null;
+	public static IMyMotorStator Connector = null;
+	public static bool IsLaunched = false;
 
 
 
@@ -740,41 +716,49 @@ static class RoverControl {
 	// Remember to call this first
 	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
 		Program = program;
-		Program.Echo("Initializing ShipControl");
+		Program.Echo("Initializing SimpleMissile");
 		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
 		
-		Controller = blocks.OfType<IMyShipController>().Where(s => s.IsMainCockpit).FirstOrDefault();
-		if (Controller == null) Controller = blocks.OfType<IMyShipController>().FirstOrDefault();
-		Program.Echo("    Controller: " + (Controller == null ? "none" : Controller.CustomName));
-		if (Controller == null) Program.Echo("      WARNING: No cockpit or remote control!");
+		Controller = blocks.OfType<IMyRemoteControl>().FirstOrDefault();
+		Program.Echo("    Controller: " + (Controller != null));
+		Connector = GetConnector();
+		Program.Echo("    Connector: " + (Connector != null));
 		
-		Remotes = blocks.OfType<IMyRemoteControl>().ToList();
-		Program.Echo("    Remotes: " + Remotes.Count);
-		Wheels = blocks.OfType<IMyMotorSuspension>().ToList();
-		Program.Echo("    Wheels: " + Wheels.Count);
+		foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) {
+			var tank = block as IMyGasTank;
+			if (tank != null) tank.Stockpile = true;
+			else if (block == Connector || block == tank || block == Program.Me) {
+				block.Enabled = true;
+			}
+			else block.Enabled = false;
+		}
 	}
-	public static void Drive() {
-		if (Controller == null) Base.Throw("Ship has no controller");
-		
-		var input = Base.GetInput(Controller);
-		Vector3D forwardDirection = Controller.WorldMatrix.Forward;
-		Vector3D rightDirection = Controller.WorldMatrix.Right;
-		foreach (IMyMotorSuspension wheel in Wheels) {
-			Vector3D wheelDirection = wheel.WorldMatrix.Up;
-			Vector3D wheelPosition = wheel.GetPosition() - Controller.GetPosition();
-			bool isRightWheel = Vector3D.Dot(rightDirection, wheelDirection) > 0.0;
-			bool isFrontWheel = Vector3D.Dot(forwardDirection, wheelPosition) > 0.0;
-			double steering = Controller.MoveIndicator.X;
-			double throttle = Controller.MoveIndicator.Z;
-			// Only assign if value changed to avoid network/physics issues
-			float steerOverride = (float)(isFrontWheel ? -steering : steering);
-			float propulsionOverride = (float)(isRightWheel ? throttle : -throttle);
-			if (wheel.SteeringOverride != steerOverride) wheel.SteeringOverride = steerOverride;
-			if (wheel.PropulsionOverride != propulsionOverride) wheel.PropulsionOverride = propulsionOverride;
+	// Call this every frame
+	public static void Update() {
+		if (IsLaunched) return;
+		if (Connector == null) Connector = GetConnector();
+		else if (Controller.IsUnderControl) { // Camera.IsActive
+			IsLaunched = true;
+			foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) block.Enabled = true;
+			foreach (var tank in Base.GridBlocks.OfType<IMyGasTank>()) tank.Stockpile = false;
+			foreach (var warhead in Base.GridBlocks.OfType<IMyWarhead>()) warhead.IsArmed = true;
+			Connector?.Detach();
 		}
-		foreach (var remote in Remotes) {
-			remote.HandBrake = Controller.HandBrake;
+		//if (!Connector.IsAttached) Connector.ApplyAction("Attach");
+	}
+
+
+
+	//// PRIVATE METHODS ////
+	static IMyMotorStator GetConnector() {
+		var motors = new List<IMyMotorStator>();
+		Program.GridTerminalSystem.GetBlocksOfType(motors);
+		foreach (var motor in motors) {
+			if (!motor.IsSameConstructAs(Program.Me)) continue;
+			var head = motor.Top;
+			if (head == null) continue;
+			if (head.CubeGrid == Program.Me.CubeGrid) return motor;
 		}
+		return null;
 	}
 }
-
