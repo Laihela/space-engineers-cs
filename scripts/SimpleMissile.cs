@@ -12,28 +12,45 @@ Program () {
 	
 	// Change settings
 	Base.Title = "Simple Missile";
-	Base.SetLCDTheme(Base.GroupBlocks, Color.Orange, Color.Black);
+	Base.SetLCDTheme(Base.GridBlocks, Color.Orange, Color.Black);
 	ShipControl.GyroMaxDelta = 0.1;
 	ShipControl.MaxShipSpeed = 100.0;
+	ShipControl.APPROACH_SLOW_DOWN = 30.0;
 	
-	Runtime.UpdateFrequency = UpdateFrequency.Update1;
+	Runtime.UpdateFrequency = UpdateFrequency.Update10;
 
 }
 
 
 
 //// EXECUTION ////
-void Main(string argument) {
+void Main(string argument, UpdateType updateType) {
 	try {
 
 		Base.Update(); // Always update Base first!
 		ShipControl.Update();
 		SimpleMissile.Update();
-		
-		if (SimpleMissile.IsLaunched) {
-			ShipControl.CentripetalFlight(0.02);
+
+		if (argument.ToLower().Contains("gps")) {
+			string[] bits = argument.Split(':');
+			if (bits.Length > 4) {
+				guidance = "gps";
+				target = new Vector3D(double.Parse(bits[2]), double.Parse(bits[3]), double.Parse(bits[4]));
+				SimpleMissile.Deploy();
+			}
+			else Base.Warn("Incorrect GPS format: " + argument);
 		}
-		
+
+		if (SimpleMissile.IsDeployed) {
+			if (guidance == "gps") {
+				Vector3D targetDirection = target - SimpleMissile.Warhead.GetPosition();
+				ShipControl.SetVelocity(ShipControl.Controllers[0].WorldMatrix.Forward);
+				ShipControl.SetAngle(Vector3D.Normalize(targetDirection));
+				if (targetDirection.Length() < 5.0) SimpleMissile.Warhead.Detonate();
+			}
+			else ShipControl.CentripetalFlight(0.02);
+		}
+
 		// Call Base.ProcessorLoad last, anything after wont be taken into account.
 		Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
 
@@ -43,9 +60,15 @@ void Main(string argument) {
 
 
 
+//// STATE ////
+string guidance = "manual";
+Vector3D target = Vector3D.Zero;
+
+
+
 //// CLASSES ////
 static class Base {
-	public static readonly DateTime Version = new DateTime(2022, 07, 22, 00, 00, 00);
+	public static readonly DateTime Version = new DateTime(2022, 09, 17, 01, 38, 00);
 
 
 
@@ -81,6 +104,10 @@ static class Base {
 	static DateTime lastUpdate = DateTime.Now;
 	static double realDeltaTime = 0.0;
 	static string symbol = "";
+	static StringBuilder printBuilder = new StringBuilder();
+	static StringBuilder warnBuilder = new StringBuilder();
+	static Color contentColor = new Color(179, 237, 255);
+	static Color backgroundColor = new Color(0, 88, 151);
 
 
 
@@ -103,23 +130,29 @@ static class Base {
 		//Program.Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
 		//SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 		DisplayOutput(Program.Me.GetSurface(0));
+		SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 		DisplayKeyboard(Program.Me.GetSurface(1));
-		SetLCDTheme(Program.Me.GetSurface(1), new Color(128, 255, 0), new Color(0, 0, 0));
 	}
 	// Call this first, every frame.
 	public static void Update() {
-		foreach (var display in OutputDisplays) display.WriteText($"{Title} {symbol}\n", false);
+		FlushOutput();
+		Print($"{Title} {symbol}");
 		realDeltaTime = (DateTime.Now - lastUpdate).TotalSeconds;
 		lastUpdate = DateTime.Now;
 		UpdateSymbol();
 	}
 	// Write text to all output displays.
 	public static void Print(object message) {
-		foreach (var display in OutputDisplays) display.WriteText(message.ToString() + "\n", true);
+		//foreach (var display in OutputDisplays) display.WriteText(message.ToString() + "\n", true);
+		printBuilder.Append(message).Append('\n');
+	}
+	public static void Warn (object message) {
+		warnBuilder.Append(message).Append('\n');
 	}
 	// Write an error message to all output displays and stop the program.
 	public static void Throw(object message) {
 		Print("ERR: " + message.ToString());
+		FlushOutput();
 		SetLCDTheme(Program.Me, new Color(0, 0, 0), new Color(255, 0, 0));
 		SetLCDTheme(OutputDisplays, new Color(0, 0, 0), new Color(255, 0, 0));
 		throw new System.Exception(message.ToString());
@@ -131,7 +164,6 @@ static class Base {
 	// Target can be a text surface, a block, block list, etc... (see cases)
 	// Tag: if provided, only adds blocks which have the tag string in their name (for collections only).
 	// SurfaceId: If provided, only adds one display from the block(s) with the specified surfaceId (if it exists).
-	// !!! Changes the theme of the display(s) !!!
 	public static void DisplayOutput(object target, string tag = "", int surfaceId = -1) {
 		
 		// Cases should be ordered from least recursive to most recursive, and then from most used to least used for best performance.
@@ -140,7 +172,7 @@ static class Base {
 		var display = target as IMyTextSurface;
 		if (display != null) {
 			display.ContentType = ContentType.TEXT_AND_IMAGE;
-			SetLCDTheme(display, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
+			//SetLCDTheme(display, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 			OutputDisplays.Add(display);
 			return;
 		}
@@ -215,8 +247,8 @@ static class Base {
 			return;
 		}
 	}
-	
-	
+
+
 	//// MISC ////
 	// Returns current time in seconds.
 	public static double Now() {
@@ -379,15 +411,21 @@ static class Base {
 			if (data == "") continue;
 			BlockProperties.Add(block, new Dictionary<string, string>());
 			foreach (string line in data.Split('\n')) {
-				string[] prop = line.Split(':');
-				if (prop.Length != 2) continue;
-				BlockProperties[block].Add(prop[0].Trim(' ').ToLower(), prop[1].Trim(' '));
+				int split = line.IndexOf(':');
+				if (split == -1) continue;
+				string propName = line.Substring(0, split).Trim(' ').ToLower();
+				string propValue = line.Substring(split + 1).Trim(' ');
+				BlockProperties[block].Add(propName, propValue);
 			}
 		}
 	}
+	static void FlushOutput() {
+		foreach (var display in OutputDisplays) display.WriteText(warnBuilder.ToString() + printBuilder.ToString());
+		printBuilder.Clear();
+	}
 }
 static class ShipControl {
-	public static readonly DateTime Version = new DateTime(2022, 07, 22);
+	public static readonly DateTime Version = new DateTime(2022, 09, 16);
 
 
 
@@ -495,8 +533,6 @@ static class ShipControl {
 		if (Controllers.Count == 0) Program.Echo("    WARNING: No cockpit or remote control, functionality limited!");
 		
 		if (controlGyroscopes == false) Gyroscopes.Clear();
-		
-		Base.Print("ShipControl.Init");
 		foreach (var gyro in Gyroscopes) gyro.GyroOverride = true;
 		
 		ThrusterGroups.Add(new ThrusterGroup(Thrusters, Base6Directions.Direction.Forward));
@@ -700,15 +736,16 @@ static class ShipControl {
 	static Vector3D lastTargetUp = Vector3D.Zero;
 }
 static class SimpleMissile {
-	public static readonly DateTime Version = new DateTime(2022, 09, 14);
+	public static readonly DateTime Version = new DateTime(2022, 09, 17, 01, 54, 0);
 
 
 
 	//// PUBLIC DATA ////
 	public static MyGridProgram Program;
 	public static IMyRemoteControl Controller = null;
-	public static IMyMotorStator Connector = null;
-	public static bool IsLaunched = false;
+	public static IMyMotorBase Connector = null;
+	public static IMyWarhead Warhead = null;
+	public static bool IsDeployed = false;
 
 
 
@@ -723,38 +760,53 @@ static class SimpleMissile {
 		Program.Echo("    Controller: " + (Controller != null));
 		Connector = GetConnector();
 		Program.Echo("    Connector: " + (Connector != null));
+		Warhead = blocks.OfType<IMyWarhead>().FirstOrDefault();
+		Program.Echo("    Warhead: " + (Warhead != null));
 		
-		foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) {
-			var tank = block as IMyGasTank;
-			if (tank != null) tank.Stockpile = true;
-			else if (block == Connector || block == tank || block == Program.Me) {
-				block.Enabled = true;
-			}
-			else block.Enabled = false;
-		}
+		if (Program.Me.CustomData.Contains("SimpleMissile") == false) Program.Me.CustomData = "SimpleMissile\n" + Program.Me.CustomData;
+		Standby();
 	}
 	// Call this every frame
 	public static void Update() {
-		if (IsLaunched) return;
 		if (Connector == null) Connector = GetConnector();
-		else if (Controller.IsUnderControl) { // Camera.IsActive
-			IsLaunched = true;
-			foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) block.Enabled = true;
-			foreach (var tank in Base.GridBlocks.OfType<IMyGasTank>()) tank.Stockpile = false;
-			foreach (var warhead in Base.GridBlocks.OfType<IMyWarhead>()) warhead.IsArmed = true;
-			Connector?.Detach();
+		if (IsDeployed) {
+			if (Warhead != null) Warhead.IsArmed = true;
 		}
-		//if (!Connector.IsAttached) Connector.ApplyAction("Attach");
+		else if (Controller.IsUnderControl) Deploy();
+	}
+	public static void Deploy() {
+		if (IsDeployed) return;
+		if (Connector == null) Connector = GetConnector();
+		foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) {
+			block.Enabled = true;
+			var battery = block as IMyBatteryBlock;
+			var tank = block as IMyGasTank;
+			if (battery != null) battery.ChargeMode = ChargeMode.Discharge;
+			if (tank != null) tank.Stockpile = false;
+		}
+		Connector?.Detach();
+		IsDeployed = true;
 	}
 
 
 
 	//// PRIVATE METHODS ////
-	static IMyMotorStator GetConnector() {
-		var motors = new List<IMyMotorStator>();
+	static void Standby() {
+		foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) {
+			var battery = block as IMyBatteryBlock;
+			var tank = block as IMyGasTank;
+			if (battery != null) battery.ChargeMode = ChargeMode.Recharge;
+			if (tank != null) tank.Stockpile = true;
+			if (block == Connector || block == tank || block == battery || block == Program.Me) {
+				block.Enabled = true;
+			}
+			else block.Enabled = false;
+		}
+	}
+	static IMyMotorBase GetConnector() {
+		var motors = new List<IMyMotorBase>();
 		Program.GridTerminalSystem.GetBlocksOfType(motors);
 		foreach (var motor in motors) {
-			if (!motor.IsSameConstructAs(Program.Me)) continue;
 			var head = motor.Top;
 			if (head == null) continue;
 			if (head.CubeGrid == Program.Me.CubeGrid) return motor;
@@ -762,3 +814,4 @@ static class SimpleMissile {
 		return null;
 	}
 }
+

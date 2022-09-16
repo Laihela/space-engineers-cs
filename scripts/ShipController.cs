@@ -8,6 +8,7 @@ Program () {
 	// Initialize classes
 	Base.Init(this); // Always init Base first!
 	ShipControl.Init(this, Base.GridBlocks);
+	MissileLauncher.Init(this, Base.GridBlocks);
 	//RoverControl.Init(this, Base.GridBlocks);
 	
 	// Change settings
@@ -28,8 +29,22 @@ Program () {
 //// EXECUTION ////
 void Main(string argument) {
 	try {
-		
-		if (argument == "") {
+
+		if (argument == "launchGPS") {
+			MissileLauncher.LaunchGPS();
+		}
+
+		else if (argument == "approach") {
+			ApproachMode = !ApproachMode;
+			if (ApproachMode) ShipControl.MaxShipSpeed = 1.0;
+			else ShipControl.MaxShipSpeed = 100.0;
+		}
+
+		else if (argument == "gravity") {
+			CancelGravity = !CancelGravity;
+		}
+
+		else {
 			Base.Update(); // Always update Base first!
 			ShipControl.Update();
 			
@@ -42,29 +57,21 @@ void Main(string argument) {
 			Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
 		}
 
-		else if (argument.Contains("SetSpeed")) {
-			ShipControl.MaxShipSpeed = double.Parse(argument.Split(':')[1]);
-		}
-
-		else if (argument == "SwitchMode") {
-			CancelGravity = !CancelGravity;
-		}
 	}
-	catch (System.Exception exception) {
-		Base.Throw(exception);
-	}
+	catch (System.Exception exception) { Base.Throw(exception); }
 }
 
 
 
 //// STATE ////
 bool CancelGravity = true;
+bool ApproachMode = false;
 
 
 
 //// CLASSES ////
 static class Base {
-	public static readonly DateTime Version = new DateTime(2022, 07, 22, 00, 00, 00);
+	public static readonly DateTime Version = new DateTime(2022, 09, 17, 01, 38, 00);
 
 
 
@@ -100,6 +107,10 @@ static class Base {
 	static DateTime lastUpdate = DateTime.Now;
 	static double realDeltaTime = 0.0;
 	static string symbol = "";
+	static StringBuilder printBuilder = new StringBuilder();
+	static StringBuilder warnBuilder = new StringBuilder();
+	static Color contentColor = new Color(179, 237, 255);
+	static Color backgroundColor = new Color(0, 88, 151);
 
 
 
@@ -122,23 +133,29 @@ static class Base {
 		//Program.Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
 		//SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 		DisplayOutput(Program.Me.GetSurface(0));
+		SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 		DisplayKeyboard(Program.Me.GetSurface(1));
-		SetLCDTheme(Program.Me.GetSurface(1), new Color(128, 255, 0), new Color(0, 0, 0));
 	}
 	// Call this first, every frame.
 	public static void Update() {
-		foreach (var display in OutputDisplays) display.WriteText($"{Title} {symbol}\n", false);
+		FlushOutput();
+		Print($"{Title} {symbol}");
 		realDeltaTime = (DateTime.Now - lastUpdate).TotalSeconds;
 		lastUpdate = DateTime.Now;
 		UpdateSymbol();
 	}
 	// Write text to all output displays.
 	public static void Print(object message) {
-		foreach (var display in OutputDisplays) display.WriteText(message.ToString() + "\n", true);
+		//foreach (var display in OutputDisplays) display.WriteText(message.ToString() + "\n", true);
+		printBuilder.Append(message).Append('\n');
+	}
+	public static void Warn (object message) {
+		warnBuilder.Append(message).Append('\n');
 	}
 	// Write an error message to all output displays and stop the program.
 	public static void Throw(object message) {
 		Print("ERR: " + message.ToString());
+		FlushOutput();
 		SetLCDTheme(Program.Me, new Color(0, 0, 0), new Color(255, 0, 0));
 		SetLCDTheme(OutputDisplays, new Color(0, 0, 0), new Color(255, 0, 0));
 		throw new System.Exception(message.ToString());
@@ -150,7 +167,6 @@ static class Base {
 	// Target can be a text surface, a block, block list, etc... (see cases)
 	// Tag: if provided, only adds blocks which have the tag string in their name (for collections only).
 	// SurfaceId: If provided, only adds one display from the block(s) with the specified surfaceId (if it exists).
-	// !!! Changes the theme of the display(s) !!!
 	public static void DisplayOutput(object target, string tag = "", int surfaceId = -1) {
 		
 		// Cases should be ordered from least recursive to most recursive, and then from most used to least used for best performance.
@@ -159,7 +175,7 @@ static class Base {
 		var display = target as IMyTextSurface;
 		if (display != null) {
 			display.ContentType = ContentType.TEXT_AND_IMAGE;
-			SetLCDTheme(display, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
+			//SetLCDTheme(display, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 			OutputDisplays.Add(display);
 			return;
 		}
@@ -234,8 +250,8 @@ static class Base {
 			return;
 		}
 	}
-	
-	
+
+
 	//// MISC ////
 	// Returns current time in seconds.
 	public static double Now() {
@@ -398,15 +414,21 @@ static class Base {
 			if (data == "") continue;
 			BlockProperties.Add(block, new Dictionary<string, string>());
 			foreach (string line in data.Split('\n')) {
-				string[] prop = line.Split(':');
-				if (prop.Length != 2) continue;
-				BlockProperties[block].Add(prop[0].Trim(' ').ToLower(), prop[1].Trim(' '));
+				int split = line.IndexOf(':');
+				if (split == -1) continue;
+				string propName = line.Substring(0, split).Trim(' ').ToLower();
+				string propValue = line.Substring(split + 1).Trim(' ');
+				BlockProperties[block].Add(propName, propValue);
 			}
 		}
 	}
+	static void FlushOutput() {
+		foreach (var display in OutputDisplays) display.WriteText(warnBuilder.ToString() + printBuilder.ToString());
+		printBuilder.Clear();
+	}
 }
 static class ShipControl {
-	public static readonly DateTime Version = new DateTime(2022, 07, 22);
+	public static readonly DateTime Version = new DateTime(2022, 09, 16);
 
 
 
@@ -514,8 +536,6 @@ static class ShipControl {
 		if (Controllers.Count == 0) Program.Echo("    WARNING: No cockpit or remote control, functionality limited!");
 		
 		if (controlGyroscopes == false) Gyroscopes.Clear();
-		
-		Base.Print("ShipControl.Init");
 		foreach (var gyro in Gyroscopes) gyro.GyroOverride = true;
 		
 		ThrusterGroups.Add(new ThrusterGroup(Thrusters, Base6Directions.Direction.Forward));
@@ -774,6 +794,44 @@ static class RoverControl {
 		}
 		foreach (var remote in Remotes) {
 			remote.HandBrake = Controller.HandBrake;
+		}
+	}
+}
+static class MissileLauncher {
+	public static readonly DateTime Version = new DateTime(2022, 09, 17, 00, 55, 0);
+
+
+
+	//// PUBLIC DATA ////
+	public static MyGridProgram Program;
+	public static HashSet<IMyMotorBase> Connectors = new HashSet<IMyMotorBase>();
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		Program = program;
+		Program.Echo("Initializing SimpleMissile");
+		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		Connectors = blocks.OfType<IMyMotorBase>().ToHashSet();
+		Program.Echo("    Connectors: " + Connectors.Count);
+	}
+	// Tries to launch one missile
+	public static void LaunchGPS() {
+		List<IMyProgrammableBlock> computers = new List<IMyProgrammableBlock>();
+		Program.GridTerminalSystem.GetBlocksOfType(computers);
+		foreach (var computer in computers) {
+			if (!computer.CustomData.Contains("SimpleMissile")) continue;
+			//string[] data = Program.Me.CustomData.Split('\n');
+			//string gps = data.Where(s => s.Contains("gps")).FirstOrDefault();
+			//if (gps == "") continue;
+			//var args = new List<TerminalActionParameter>{ TerminalActionParameter.Get("launchGPS : " + gps) };
+			//computer.ApplyAction("Run");
+			computer.TryRun(Program.Me.CustomData);
+			//computer.TryRun("");
+			break;
 		}
 	}
 }
