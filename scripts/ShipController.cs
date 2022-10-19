@@ -6,7 +6,7 @@
 Program () {
 
 	// Initialize classes
-	Base.Init(this); // Always init Base first!
+	//Base.Init(this); // Always init Base first!
 	ShipControl.Init(this, Base.GridBlocks);
 	MissileLauncher.Init(this, Base.GridBlocks);
 	//RoverControl.Init(this, Base.GridBlocks);
@@ -70,8 +70,13 @@ bool ApproachMode = false;
 
 
 //// CLASSES ////
-static class Base {
-	public static readonly DateTime Version = new DateTime(2022, 09, 17, 01, 38, 00);
+abstract class NewBase {
+	NewBase(MyGridProgram program) {
+		
+	}
+}
+class Base : NewBase {
+	public static readonly DateTime Version = new DateTime(2022, 09, 27, 00, 04, 00);
 
 
 
@@ -89,76 +94,86 @@ static class Base {
 	public static HashSet<IMyTextSurface> OutputDisplays = new HashSet<IMyTextSurface>();
 	// DeltaTime remains consistent with simulation speed changes.
 	public static double DeltaTime { get {
-		return Program.Runtime.TimeSinceLastRun.TotalSeconds;
+		return _program.Runtime.TimeSinceLastRun.TotalSeconds;
 	}}
 	// Real-time seconds between updates, will increase if simulation speed drops.
 	public static double RealDeltaTime { get {
-		return realDeltaTime;
+		return _realDeltaTime;
 	}}
 	// Ratio of currently used program instructions to max allowed instructions. (0 to 1)
 	public static double ProcessorLoad { get {
-		return (double)Program.Runtime.CurrentInstructionCount / Program.Runtime.MaxInstructionCount;
+		return (double)_program.Runtime.CurrentInstructionCount / _program.Runtime.MaxInstructionCount;
 	}}
 
 
 
 	//// PRIVATE DATA ////
-	static MyGridProgram Program;
-	static DateTime lastUpdate = DateTime.Now;
-	static double realDeltaTime = 0.0;
-	static string symbol = "";
-	static StringBuilder printBuilder = new StringBuilder();
-	static StringBuilder warnBuilder = new StringBuilder();
-	static Color contentColor = new Color(179, 237, 255);
-	static Color backgroundColor = new Color(0, 88, 151);
+	static MyGridProgram _program;
+	static bool _isInitialized = false;
+	static DateTime _lastUpdate = DateTime.Now;
+	static double _realDeltaTime = 0.0;
+	static string _symbol = "";
+	static StringBuilder _printBuffer = new StringBuilder();
+	static StringBuilder _warnBuffer = new StringBuilder();
+	static Color _contentColor = new Color(179, 237, 255);
+	static Color _backgroundColor = new Color(0, 88, 151);
 
 
 
 	//// PUBLIC METHODS ////
 	// Remember to call this first, before all other classes.
 	public static void Init(MyGridProgram program) {
-		Program = program;
-		Program.Echo("Initializing Base");
-		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		_program = program;
+		_program.Echo("Initializing Base");
+		_program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
 		
 		GetGroups();
 		GetBlocks();
 		ReadProperties();
 		
-		Program.Echo("    ConstructTerminalBlocks: " + ConstructBlocks.Count);
-		Program.Echo("    GroupTerminalBlocks: " + GroupBlocks.Count);
-		Program.Echo("    GridTerminalBlocks: " + GridBlocks.Count);
-		Program.Echo("    MyBlockGroups: " + MyBlockGroups.Count);
+		_program.Echo("    ConstructTerminalBlocks: " + ConstructBlocks.Count);
+		_program.Echo("    GroupTerminalBlocks: " + GroupBlocks.Count);
+		_program.Echo("    GridTerminalBlocks: " + GridBlocks.Count);
+		_program.Echo("    MyBlockGroups: " + MyBlockGroups.Count);
 		
-		//Program.Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
-		//SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
-		DisplayOutput(Program.Me.GetSurface(0));
-		SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
-		DisplayKeyboard(Program.Me.GetSurface(1));
+		//_program.Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
+		//SetLCDTheme(_program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
+		DisplayOutput(_program.Me.GetSurface(0));
+		SetLCDTheme(_program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
+		DisplayKeyboard(_program.Me.GetSurface(1));
 	}
 	// Call this first, every frame.
 	public static void Update() {
+		AssertInit();
 		FlushOutput();
-		Print($"{Title} {symbol}");
-		realDeltaTime = (DateTime.Now - lastUpdate).TotalSeconds;
-		lastUpdate = DateTime.Now;
+		Print($"{Title} {_symbol}");
+		_realDeltaTime = (DateTime.Now - _lastUpdate).TotalSeconds;
+		_lastUpdate = DateTime.Now;
 		UpdateSymbol();
 	}
 	// Write text to all output displays.
-	public static void Print(object message) {
+	public static void Print(string message) {
+		AssertInit();
 		//foreach (var display in OutputDisplays) display.WriteText(message.ToString() + "\n", true);
-		printBuilder.Append(message).Append('\n');
+		_printBuffer.Append(message).Append('\n');
+	}
+	public static void Print(object message) {
+		Print(message.ToString());
 	}
 	public static void Warn (object message) {
-		warnBuilder.Append(message).Append('\n');
+		_warnBuffer.Append(message).Append('\n');
 	}
 	// Write an error message to all output displays and stop the program.
 	public static void Throw(object message) {
 		Print("ERR: " + message.ToString());
 		FlushOutput();
-		SetLCDTheme(Program.Me, new Color(0, 0, 0), new Color(255, 0, 0));
+		SetLCDTheme(_program.Me, new Color(0, 0, 0), new Color(255, 0, 0));
 		SetLCDTheme(OutputDisplays, new Color(0, 0, 0), new Color(255, 0, 0));
 		throw new System.Exception(message.ToString());
+	}
+	// Make sure that Init() has been called, if not, throw an error.
+	public static void AssertInit() {
+		if (_isInitialized == false) throw new System.Exception($"Class has not been initialized!");
 	}
 
 
@@ -215,7 +230,7 @@ static class Base {
 		));
 	}
 	// Change colors and set font to Monospace on a display. Also works for list if displays, a block, or a list of blocks.
-	public static void SetLCDTheme(object target, Color? contentColor = null, Color? backgroundColor = null, float fontSize = -1f, float textPadding = -1f) {
+	public static void SetLCDTheme(object target, Color? _contentColor = null, Color? _backgroundColor = null, float fontSize = -1f, float textPadding = -1f) {
 		
 		// Cases should be ordered from most specific to least specific, then from least
 		// recursive to most recursive, and then from most used to least used for best performance.
@@ -223,8 +238,8 @@ static class Base {
 		// Case: target is single display.
 		var display = target as IMyTextSurface;
 		if (display != null) {
-			Color content = contentColor.GetValueOrDefault(new Color(179, 237, 255));
-			Color background = backgroundColor.GetValueOrDefault(new Color(0, 88, 151));
+			Color content = _contentColor.GetValueOrDefault(new Color(179, 237, 255));
+			Color background = _backgroundColor.GetValueOrDefault(new Color(0, 88, 151));
 			display.ScriptBackgroundColor = background;
 			display.ScriptForegroundColor = content;
 			display.BackgroundColor = background;
@@ -239,14 +254,14 @@ static class Base {
 		// Case: target is a single block (and has displays), call recursively for each display. (1 layer recursion)
 		var block = target as IMyTextSurfaceProvider;
 		if (block != null) {
-			for(int x = 0; x < block.SurfaceCount; x++) SetLCDTheme(block.GetSurface(x), contentColor, backgroundColor, fontSize, textPadding);
+			for(int x = 0; x < block.SurfaceCount; x++) SetLCDTheme(block.GetSurface(x), _contentColor, _backgroundColor, fontSize, textPadding);
 			return;
 		}
 		
 		// Case: target is a collection, call recursively for each item. (1 or more layers of recursion depending on collection type)
 		var items = target as IEnumerable;
 		if (items != null) {
-			foreach (var x in items) SetLCDTheme(x, contentColor, backgroundColor, fontSize, textPadding);
+			foreach (var x in items) SetLCDTheme(x, _contentColor, _backgroundColor, fontSize, textPadding);
 			return;
 		}
 	}
@@ -379,28 +394,28 @@ static class Base {
 
 	//// PRIVATE METHODS ////
 	static void UpdateSymbol() {
-		if       (symbol == "|")  symbol = "/";
-		else if  (symbol == "/")  symbol = "-";
-		else if  (symbol == "-")  symbol = "\\";
-		else                      symbol = "|";
+		if       (_symbol == "|")  _symbol = "/";
+		else if  (_symbol == "/")  _symbol = "-";
+		else if  (_symbol == "-")  _symbol = "\\";
+		else                      _symbol = "|";
 	}
 	static void GetGroups() {
 		List<IMyBlockGroup> blockGroups = new List<IMyBlockGroup>();
-		Program.GridTerminalSystem.GetBlockGroups(blockGroups);
+		_program.GridTerminalSystem.GetBlockGroups(blockGroups);
 		foreach(var blockGroup in blockGroups) {
 			List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
 			blockGroup.GetBlocks(blocks);
-			if (blocks.Contains(Program.Me) == false) continue;
+			if (blocks.Contains(_program.Me) == false) continue;
 			foreach (var block in blocks) GroupBlocks.Add(block);
 			MyBlockGroups.Add(blockGroup.Name, new HashSet<IMyTerminalBlock>(blocks));
 		}
 	}
 	static void GetBlocks() {
 		List<IMyTerminalBlock> terminalBlocks = new List<IMyTerminalBlock>();
-		Program.GridTerminalSystem.GetBlocks(terminalBlocks);
+		_program.GridTerminalSystem.GetBlocks(terminalBlocks);
 		foreach (var block in terminalBlocks) {
-			if (block.IsSameConstructAs(Program.Me)) ConstructBlocks.Add(block);
-			if (block.CubeGrid == Program.Me.CubeGrid) GridBlocks.Add(block);
+			if (block.IsSameConstructAs(_program.Me)) ConstructBlocks.Add(block);
+			if (block.CubeGrid == _program.Me.CubeGrid) GridBlocks.Add(block);
 		}
 		
 	}
@@ -423,8 +438,8 @@ static class Base {
 		}
 	}
 	static void FlushOutput() {
-		foreach (var display in OutputDisplays) display.WriteText(warnBuilder.ToString() + printBuilder.ToString());
-		printBuilder.Clear();
+		foreach (var display in OutputDisplays) display.WriteText(_warnBuffer.ToString() + _printBuffer.ToString());
+		_printBuffer.Clear();
 	}
 }
 static class ShipControl {
