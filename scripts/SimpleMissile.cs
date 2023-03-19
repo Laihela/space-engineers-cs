@@ -16,8 +16,9 @@ Program () {
 	ShipControl.GyroMaxDelta = 0.1;
 	ShipControl.MaxShipSpeed = 100.0;
 	ShipControl.APPROACH_SLOW_DOWN = 30.0;
+	SimpleMissile.DropTime = 0.5f;
 	
-	Runtime.UpdateFrequency = UpdateFrequency.Update10;
+	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
 }
 
@@ -41,7 +42,7 @@ void Main(string argument, UpdateType updateType) {
 			else Base.Warn("Incorrect GPS format: " + argument);
 		}
 
-		if (SimpleMissile.IsDeployed) {
+		if (SimpleMissile.IsDeployed && SimpleMissile.DropTime < 0.001) {
 			if (guidance == "gps") {
 				Vector3D targetDirection = target - SimpleMissile.Warhead.GetPosition();
 				ShipControl.SetVelocity(ShipControl.Controllers[0].WorldMatrix.Forward);
@@ -736,7 +737,7 @@ static class ShipControl {
 	static Vector3D lastTargetUp = Vector3D.Zero;
 }
 static class SimpleMissile {
-	public static readonly DateTime Version = new DateTime(2022, 09, 17, 01, 54, 0);
+	public static readonly DateTime Version = new DateTime(2023, 03, 19, 21, 27, 0);
 
 
 
@@ -744,8 +745,11 @@ static class SimpleMissile {
 	public static MyGridProgram Program;
 	public static IMyRemoteControl Controller = null;
 	public static IMyMotorBase Connector = null;
-	public static IMyWarhead Warhead = null;
-	public static bool IsDeployed = false;
+	public static IMyWarhead Warhead = null; // TODO: multiple warheads
+	public static bool IsDeployed { get { return isDeployed; } }
+	public static bool LaunchWithRotorDisplacement = true;
+	public static double MaxRotorDisplacement = -0.11;
+	public static double DropTime = 0.0;
 
 
 
@@ -769,13 +773,14 @@ static class SimpleMissile {
 	// Call this every frame
 	public static void Update() {
 		if (Connector == null) Connector = GetConnector();
-		if (IsDeployed) {
+		if (isDeployed) {
 			if (Warhead != null) Warhead.IsArmed = true;
+			if (DropTime > 0.0) DropTime -= Base.RealDeltaTime;
 		}
 		else if (Controller.IsUnderControl) Deploy();
 	}
 	public static void Deploy() {
-		if (IsDeployed) return;
+		if (isDeployed) return;
 		if (Connector == null) Connector = GetConnector();
 		foreach (var block in Base.GridBlocks.OfType<IMyFunctionalBlock>()) {
 			block.Enabled = true;
@@ -784,9 +789,19 @@ static class SimpleMissile {
 			if (battery != null) battery.ChargeMode = ChargeMode.Discharge;
 			if (tank != null) tank.Stockpile = false;
 		}
+		if (LaunchWithRotorDisplacement && isConnectorExtended == false) {
+			ExtendConnectorRotor();
+			return;
+		}
 		Connector?.Detach();
-		IsDeployed = true;
+		isDeployed = true;
 	}
+
+
+
+	//// PRIVATE DATA ////
+	static bool isDeployed = false;
+	static bool isConnectorExtended = false;
 
 
 
@@ -812,6 +827,12 @@ static class SimpleMissile {
 			if (head.CubeGrid == Program.Me.CubeGrid) return motor;
 		}
 		return null;
+	}
+	static void ExtendConnectorRotor() {
+		var rotor = Connector as IMyMotorStator;
+		if (rotor == null) return;
+		rotor.Displacement = (float)MaxRotorDisplacement;
+		isConnectorExtended = true;
 	}
 }
 
