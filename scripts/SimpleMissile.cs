@@ -17,6 +17,7 @@ Program () {
 	ShipControl.MaxShipSpeed = 100.0;
 	ShipControl.APPROACH_SLOW_DOWN = 30.0;
 	SimpleMissile.DropTime = 0.5f;
+	SimpleMissile.DeployAntennaRange = 20000;
 	
 	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
@@ -737,7 +738,7 @@ static class ShipControl {
 	static Vector3D lastTargetUp = Vector3D.Zero;
 }
 static class SimpleMissile {
-	public static readonly DateTime Version = new DateTime(2023, 03, 19, 21, 27, 0);
+	public static readonly DateTime Version = new DateTime(2023, 03, 20, 02, 26, 0);
 
 
 
@@ -747,9 +748,10 @@ static class SimpleMissile {
 	public static IMyMotorBase Connector = null;
 	public static IMyWarhead Warhead = null; // TODO: multiple warheads
 	public static bool IsDeployed { get { return isDeployed; } }
-	public static bool LaunchWithRotorDisplacement = true;
+	public static bool LaunchWithRotorDisplacement = false;
 	public static double MaxRotorDisplacement = -0.11;
 	public static double DropTime = 0.0;
+	public static double DeployAntennaRange = 10000.0;
 
 
 
@@ -786,8 +788,10 @@ static class SimpleMissile {
 			block.Enabled = true;
 			var battery = block as IMyBatteryBlock;
 			var tank = block as IMyGasTank;
+			var antenna = block as IMyRadioAntenna;
 			if (battery != null) battery.ChargeMode = ChargeMode.Discharge;
 			if (tank != null) tank.Stockpile = false;
+			if (antenna != null) antenna.Radius = (float)DeployAntennaRange;
 		}
 		if (LaunchWithRotorDisplacement && isConnectorExtended == false) {
 			ExtendConnectorRotor();
