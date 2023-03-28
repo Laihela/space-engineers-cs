@@ -6,9 +6,12 @@
 Program () {
 
 	// Initialize classes
-	//Base.Init(this); // Always init Base first!
+	Base.Init(this); // Always init Base first!
 	ShipControl.Init(this, Base.GridBlocks);
+	RotorControl.Init(this, Base.ConstructBlocks);
 	MissileLauncher.Init(this, Base.GridBlocks);
+	SolarControl.Init(this, Base.ConstructBlocks);
+	TargetTracking.Init(this, Base.GridBlocks);
 	//RoverControl.Init(this, Base.GridBlocks);
 	
 	// Change settings
@@ -19,6 +22,7 @@ Program () {
 	Base.SetLCDTheme(Base.GroupBlocks, Color.Yellow, Color.Black);
 	ShipControl.GyroMaxDelta = 0.1;
 	ShipControl.MaxShipSpeed = 100.0;
+	TargetTracking.PingEnabled = true;
 	
 	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
@@ -34,24 +38,58 @@ void Main(string argument) {
 			MissileLauncher.LaunchGPS();
 		}
 
-		else if (argument == "approach") {
-			ApproachMode = !ApproachMode;
-			if (ApproachMode) ShipControl.MaxShipSpeed = 1.0;
+		else if (argument == "faster") {
+			if (ShipControl.MaxShipSpeed == 1.0) ShipControl.MaxShipSpeed = 5.0;
+			else if (ShipControl.MaxShipSpeed == 5.0) ShipControl.MaxShipSpeed = 30.0;
+			else if (ShipControl.MaxShipSpeed == 30.0) ShipControl.MaxShipSpeed = 80.0;
 			else ShipControl.MaxShipSpeed = 100.0;
+		}
+
+		else if (argument == "slower") {
+			if (ShipControl.MaxShipSpeed == 100.0) ShipControl.MaxShipSpeed = 80.0;
+			else if (ShipControl.MaxShipSpeed == 80.0) ShipControl.MaxShipSpeed = 30.0;
+			else if (ShipControl.MaxShipSpeed == 30.0) ShipControl.MaxShipSpeed = 5.0;
+			else if (ShipControl.MaxShipSpeed == 5.0) ShipControl.MaxShipSpeed = 1.0;
+			else ShipControl.MaxShipSpeed = 1.0;
 		}
 
 		else if (argument == "gravity") {
 			CancelGravity = !CancelGravity;
 		}
 
+		else if (argument == "target") {
+			if (TargetTracking.CurrentTarget == null) TargetTracking.Ping();
+			else TargetTracking.CurrentTarget = null;
+		}
+
 		else {
 			Base.Update(); // Always update Base first!
+			TargetTracking.Update();
 			ShipControl.Update();
+			SolarControl.Update();
+			RotorControl.Update();
 			
-			ShipControl.CentripetalFlight(0.03, cancelGravity:CancelGravity);
-			//ShipControl.NormalFlight(0.01, cancelGravity:CancelGravity);
+			ShipControl.NormalFlight(0.03, cancelGravity:CancelGravity);
 			//ShipControl.ExperimentalFlight();
 			//RoverControl.Drive();
+			
+			if (TargetTracking.CurrentTarget != null) {
+				Base.Print("Tracking target!");
+				var controller = ShipControl.Controllers.FirstOrDefault();
+				if (controller != null) {
+					var vectors = TargetTracking.GetVectors();
+					var relativePos = vectors[0] - controller.GetPosition();
+					var relativeVel = vectors[1] - controller.GetShipVelocities().LinearVelocity;
+					var gravity = controller.GetNaturalGravity();
+					var targetLead = CalculateLead(relativePos, relativeVel, vectors[2] - gravity); // remove gravity if no bullet drop
+					ShipControl.SetAngle(relativePos + targetLead, -gravity, response: 0.2);
+					var angularCorrectionVel = Vector3D.Cross(controller.WorldMatrix.Forward, relativeVel / relativePos.Length()) * 0.5;
+					ShipControl.AddRotation(angularCorrectionVel, response: 0.2);
+				}
+			}
+			else {
+				Base.Print("Range: " + TargetTracking.GetRange());
+			}
 			
 			// Call Base.ProcessorLoad last, anything after wont be taken into account.
 			Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
@@ -63,20 +101,33 @@ void Main(string argument) {
 
 
 
+
+
+static double projectileVelocity = 400.0;
+static int calculations = 16;
+static int launchDelayFrames = 2;
+static Vector3D CalculateLead(Vector3D position, Vector3D velocity, Vector3D acceleration) {
+	double time = 0;
+	Vector3D lead = Vector3D.Zero;
+	for (int i = 0; i < calculations; i++) {
+		time = (position + lead).Length() / projectileVelocity + launchDelayFrames * Base.DeltaTime;
+		lead = velocity * time + acceleration * Math.Pow(time, 2) * 0.5;
+	}
+	return lead;
+}
+
+
+
+
+
 //// STATE ////
 bool CancelGravity = true;
-bool ApproachMode = false;
 
 
 
 //// CLASSES ////
-abstract class NewBase {
-	NewBase(MyGridProgram program) {
-		
-	}
-}
-class Base : NewBase {
-	public static readonly DateTime Version = new DateTime(2022, 09, 27, 00, 04, 00);
+static class Base {
+	public static readonly DateTime Version = new DateTime(2023, 03, 28, 03, 56, 00);
 
 
 
@@ -141,6 +192,7 @@ class Base : NewBase {
 		DisplayOutput(_program.Me.GetSurface(0));
 		SetLCDTheme(_program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
 		DisplayKeyboard(_program.Me.GetSurface(1));
+		_isInitialized = true;
 	}
 	// Call this first, every frame.
 	public static void Update() {
@@ -283,6 +335,13 @@ class Base : NewBase {
 		gyro.Pitch = v.X;
 		gyro.Yaw = v.Y;
 		gyro.Roll = v.Z;
+	}
+	public static void AddGyroVelocity(IMyGyro gyro, Vector3D velocity) {
+		// Keen coded the override for gyros backwards because Yes.
+		Vector3 v = -Base.DirectionToBlockSpace(velocity, gyro);
+		gyro.Pitch += v.X;
+		gyro.Yaw += v.Y;
+		gyro.Roll += v.Z;
 	}
 	// Get property value by name, as defined in block CustomData.
 	public static T GetBlockProperty<T>(IMyTerminalBlock block, string propertyName, T defaultValue) {
@@ -443,7 +502,7 @@ class Base : NewBase {
 	}
 }
 static class ShipControl {
-	public static readonly DateTime Version = new DateTime(2022, 09, 16);
+	public static readonly DateTime Version = new DateTime(2023, 03, 28, 04, 13, 00);
 
 
 
@@ -677,10 +736,10 @@ static class ShipControl {
 		Vector3D up = Controllers[0].WorldMatrix.Up;
 		Vector3D pitchYawDelta = Base.GetRotation(forward, targetForward);
 		Vector3D rollDelta = Vector3D.Zero;
-		if (targetUp != null) rollDelta = Base.GetRotation(up, targetUp.Value);
+		if (targetUp != null) rollDelta = forward * Vector3D.Dot(forward, Base.GetRotation(up, targetUp.Value));
 		Vector3D targetVelocity = (pitchYawDelta + rollDelta) * 0.5 / Base.DeltaTime;
 		Vector3D velocity = Controllers[0].GetShipVelocities().AngularVelocity;
-		SetRotation(targetVelocity * response - velocity * velocity.Length());
+		SetRotation(targetVelocity * -response - velocity * velocity.Length());
 	}
 	public static void SetAngle(MatrixD orientation, double response = 0.1) {
 		SetAngle(orientation.Forward, orientation.Up, response);
@@ -699,12 +758,15 @@ static class ShipControl {
 		QuaternionD.CreateFromRotationMatrix(velocity).GetAxisAngle(out axis, out angle);
 		SetRotation(axis * angle, response);
 	}
-	/*public static void AddRotation(MatrixD velocity, double response = 1.0) { /// BROKEN ///
-		Vector3D euler = Vector3D.Zero;
-		MatrixD.GetEulerAnglesXYZ(ref velocity, out euler);
-		AddRotation(euler, response);
-	}*/
-	
+	public static void AddRotation(Vector3D velocity, double response = 1.0) {
+		/*response = Base.Clamp(response, 0.0, 1.0);
+		if (Controllers.Count != 0) {
+			Vector3D myVelocity = Controllers[0].GetShipVelocities().AngularVelocity;
+			velocity = Base.Clamp((velocity - myVelocity) * response, 0.0, GyroMaxDelta) + myVelocity;
+		}*/
+		foreach (var gyro in Gyroscopes) Base.AddGyroVelocity(gyro, velocity);
+	}
+
 	public static void SetThrust(Vector3D input, bool cancelGravity = false) {
 		Vector3D gravity = Controllers.Count != 0 ? Controllers[0].GetNaturalGravity() : Vector3D.Zero;
 		foreach (var thrusterGroup in ThrusterGroups) {
@@ -812,6 +874,52 @@ static class RoverControl {
 		}
 	}
 }
+static class RotorControl {
+	public static readonly DateTime Version = new DateTime(2022, 07, 22);
+
+
+
+	//// PUBLIC SETTINGS ////
+	public static double RotorResponse = 0.1;
+
+
+
+	//// PUBLIC DATA ////
+	public static MyGridProgram Program;
+	public static HashSet<IMyShipController> Controllers = new HashSet<IMyShipController>();
+	public static HashSet<IMyMotorStator> Rotors = new HashSet<IMyMotorStator>();
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first.
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		Program = program;
+		Program.Echo("Initializing RotorControl");
+		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		Controllers = blocks.OfType<IMyShipController>().ToHashSet();
+		Program.Echo("    Controllers: " + Controllers.Count);
+		Rotors = blocks.OfType<IMyMotorStator>().ToHashSet();
+		Program.Echo("    Rotors: " + Rotors.Count);
+		
+	}
+	// Call this every frame.
+	public static void Update() {
+		var input = Base.GetInput(Controllers);
+		foreach (var rotor in Rotors) {
+			double response = Base.Clamp(RotorResponse * Base.GetBlockProperty(rotor, "response", 1.0), 0.0, 1.0);
+			double speed = 0.0;
+			speed += Base.GetBlockProperty(rotor, "x", 0.0) * input[0].X;
+			speed += Base.GetBlockProperty(rotor, "y", 0.0) * input[0].Y;
+			speed += Base.GetBlockProperty(rotor, "z", 0.0) * input[0].Z;
+			speed += Base.GetBlockProperty(rotor, "pitch", 0.0) * input[1].X * 0.1;
+			speed += Base.GetBlockProperty(rotor, "yaw", 0.0) * input[1].Y * 0.1;
+			speed += Base.GetBlockProperty(rotor, "roll", 0.0) * input[1].Z;
+			Base.SetRotorVelocity(rotor, speed * Math.PI, response);
+		}
+	}
+}
 static class MissileLauncher {
 	public static readonly DateTime Version = new DateTime(2022, 09, 17, 00, 55, 0);
 
@@ -847,6 +955,290 @@ static class MissileLauncher {
 			computer.TryRun(Program.Me.CustomData);
 			//computer.TryRun("");
 			break;
+		}
+	}
+}
+static class SolarControl {
+	public static readonly DateTime Version = new DateTime(2023, 03, 27);
+
+
+
+	//// PUBLIC SETTINGS ////
+	public static double SatisfactoryAlignment = 0.15999; // MW per solar panel
+	public static double RotorAlignSpeed = 0.7;
+	public static int RotorAlignReversals = 2;
+	public static double RotorReversalCooldown = 0.5; // seconds
+	public static string RotorAlignTag = "align";
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		program.Echo("Initializing SolarControl");
+		program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		solarPanels = blocks.OfType<IMySolarPanel>().ToHashSet();
+		program.Echo("    Solar panels: " + solarPanels.Count);
+		rotors = blocks.OfType<IMyMotorStator>().Where(rotor => Base.GetBlockProperty(rotor, RotorAlignTag, false)).ToHashSet();
+		program.Echo("    Rotors: " + rotors.Count);
+		
+		currentRotor = rotors.GetEnumerator();
+		currentRotor.MoveNext();
+	}
+	public static void Update() {
+		if (rotors.Count == 0) {
+			Base.Print("No rotors to align solar panels!");
+			return;
+		}
+		
+		// Get current solar panel aligment
+		double alignmentScore = 0.0;
+		foreach (var panel in solarPanels) alignmentScore = Math.Max(alignmentScore, panel.MaxOutput);
+		double deviation = Math.Sqrt(1.0 - alignmentScore / SatisfactoryAlignment);
+		
+		// Adjust rotors to try to align solar panels
+		currentRotor.Current.Enabled = true;
+		Base.SetRotorVelocity(currentRotor.Current, RotorAlignSpeed * deviation * currentRotorDirection);
+		if (directionSwitchCooldown > 0.0) directionSwitchCooldown -= Base.DeltaTime;
+		else if (alignmentScore >= SatisfactoryAlignment) {
+			FirstRotor();
+			foreach (var rotor in rotors) rotor.Enabled = false;
+		}
+		else if (currentRotorReversals >= RotorAlignReversals) NextRotor();
+		else if (currentRotorDirection == 0) currentRotorDirection = 1;
+		else if (alignmentScore < lastAlignmentScore || directionExpireTimer < 0.0) {
+			currentRotorDirection *= -1;
+			currentRotorReversals++;
+			directionSwitchCooldown = RotorReversalCooldown;
+			directionExpireTimer = 10.0;
+		}
+		directionExpireTimer -= Base.DeltaTime;
+		
+		lastAlignmentScore = alignmentScore;
+	}
+
+
+
+	//// PRIVATE DATA ////
+	static int currentRotorReversals = 0;
+	static HashSet<IMyMotorStator>.Enumerator currentRotor;
+	static int currentRotorDirection = 0;
+	static double lastAlignmentScore = 0.0;
+	static double directionSwitchCooldown = 0.0;
+	static double directionExpireTimer = 0.0;
+	public static HashSet<IMySolarPanel> solarPanels = new HashSet<IMySolarPanel>();
+	public static HashSet<IMyMotorStator> rotors = new HashSet<IMyMotorStator>();
+
+
+
+	//// PRIVATE METHODS ////
+	static void FirstRotor() {
+		Base.SetRotorVelocity(currentRotor.Current, 0.0);
+		currentRotor = rotors.GetEnumerator();
+		currentRotor.MoveNext();
+		currentRotorDirection = 0;
+		currentRotorReversals = 0;
+	}
+	static void NextRotor() {
+		Base.SetRotorVelocity(currentRotor.Current, 0.0);
+		currentRotor.Current.Enabled = false;
+		if (!currentRotor.MoveNext()) {
+			currentRotor = rotors.GetEnumerator();
+			currentRotor.MoveNext();
+		}
+		currentRotorDirection = 0;
+		currentRotorReversals = 0;
+	}
+}
+static class TargetTracking {
+	public static readonly DateTime Version = new DateTime(2023, 03, 28, 04, 27, 00);
+
+
+
+	//// PUBLIC SETTINGS ////
+	public static double MissingTargetExpireTime = 3.0;
+	public static double NewTargetPriorityBias = 0.95;
+	public static double TrackingJitterScale = 1.0;
+	public static bool PingEnabled = false;
+	public static List<MyDetectedEntityType> IgnoreTargetTypes = new List<MyDetectedEntityType>() { MyDetectedEntityType.Asteroid, MyDetectedEntityType.Planet };
+
+
+
+	//// PUBLIC DATA ////
+	public static MyGridProgram Program;
+	public static List<IMyCameraBlock> CameraBlocks;
+	public static Target CurrentTarget = null;
+
+
+
+	//// PRIVATE DATA ////
+	static int currentCamera = 0;
+	static DateTime lastScan = DateTime.Now;
+	static Random Rand = new Random();
+	
+	public class Target {
+		public long Id = 0;
+		public double Size = 0.0;
+		public Vector3D Position = Vector3D.Zero;
+		public Vector3D Velocity = Vector3D.Zero;
+		public Vector3D Acceleration = Vector3D.Zero;
+		public DateTime LastDetected = DateTime.Now;
+		
+		public double BlindTime {
+			get { return (DateTime.Now - LastDetected).TotalSeconds; }
+		}
+		public double Distance {
+			get { return (Position - Program.Me.GetPosition()).Length(); }
+		}
+		public double Priority {
+			get { return Size / Distance / (BlindTime + 1); }
+		}
+		public bool IsValid {
+			get { return Size != 0; }
+		}
+		public Vector3D PositionEstimate {
+			get {
+				double time = BlindTime;
+				return Position + Velocity * time + Acceleration * time * time * 0.5;
+			}
+		}
+		public Vector3D VelocityEstimate {
+			get { return Velocity + Acceleration * BlindTime; }
+		}
+		
+		public Target() {}
+		
+		public Target(MyDetectedEntityInfo entityInfo) {
+			Id = entityInfo.EntityId;
+			Size = (entityInfo.BoundingBox.Max - entityInfo.BoundingBox.Min).AbsMin();
+			Position = entityInfo.BoundingBox.Center;
+			Velocity = entityInfo.Velocity;
+		}
+		
+		public string Serialize() {
+			return String.Join(":",
+				Id,
+				Size,
+				Position.X,
+				Position.Y,
+				Position.Z,
+				Velocity.X,
+				Velocity.Y,
+				Velocity.Z,
+				Acceleration.X,
+				Acceleration.Y,
+				Acceleration.Z,
+				LastDetected.Ticks
+			);
+		}
+		
+		public static Target Deserialize(string data) {
+			Target target = new Target();
+			string[] values = data.Split(new char[]{':'}, StringSplitOptions.RemoveEmptyEntries);
+			if (values.Count() != 12) {
+				Program.Echo($"TargetTracking.Target.Deserialize: incorrect data format! ({values.Count()} values)");
+				return target;
+			}
+			target.Id = long.Parse(values[0]);
+			target.Size = double.Parse(values[1]);
+			target.Position.X = double.Parse(values[2]);
+			target.Position.Y = double.Parse(values[3]);
+			target.Position.Z = double.Parse(values[4]);
+			target.Velocity.X = double.Parse(values[5]);
+			target.Velocity.Y = double.Parse(values[6]);
+			target.Velocity.Z = double.Parse(values[7]);
+			target.Acceleration.X = double.Parse(values[8]);
+			target.Acceleration.Y = double.Parse(values[9]);
+			target.Acceleration.Z = double.Parse(values[10]);
+			target.LastDetected = new DateTime(long.Parse(values[11]));
+			return target;
+		}
+	}
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		Program = program;
+		Program.Echo("Initializing TargetTracking");
+		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		CameraBlocks = blocks.OfType<IMyCameraBlock>().ToList();
+		Program.Echo("    CameraBlocks: " + CameraBlocks.Count);
+		foreach(IMyCameraBlock camera in CameraBlocks) camera.EnableRaycast = true;
+	}
+	// Call this every frame
+	public static void Update() {
+		if (CurrentTarget == null) {
+			foreach (var camera in CameraBlocks) camera.EnableRaycast = PingEnabled;
+			return;
+		}
+		foreach (var camera in CameraBlocks) camera.EnableRaycast = true;
+		Track(CurrentTarget);
+		if (CurrentTarget.BlindTime > MissingTargetExpireTime) CurrentTarget = null;
+	}
+	public static void ConsiderTarget(object target) {
+		Target newTarget;
+		if (target is Target) newTarget = (Target)target;
+		else if (target is MyDetectedEntityInfo) newTarget = new Target((MyDetectedEntityInfo)target);
+		else if (target is string) {
+			string data = (string)target;
+			if (data == "") newTarget = new Target();
+			else newTarget = Target.Deserialize(data);
+		}
+		else {
+			Program.Echo("TargetTracking.ConsiderTarget: invalid target type: " + target.GetType());
+			return;
+		}
+		if (newTarget.IsValid == false) return;
+		if (CurrentTarget == null) CurrentTarget = newTarget;
+		if (newTarget.LastDetected < CurrentTarget.LastDetected) return;
+		if (newTarget.Priority * NewTargetPriorityBias > CurrentTarget.Priority) CurrentTarget = newTarget;
+	}
+	public static void Ping() {
+		if (CameraBlocks.Count() == 0) return;
+		IMyCameraBlock camera = CameraBlocks[currentCamera];
+		var hit = camera.Raycast(camera.AvailableScanRange);
+		if (!IgnoreTargetTypes.Contains(hit.Type)) ConsiderTarget(hit);
+		currentCamera = (currentCamera + 1) % CameraBlocks.Count;
+	}
+	public static double GetRange() {
+		if (CameraBlocks.Count() == 0) return 0.0;
+		return CameraBlocks[currentCamera].AvailableScanRange;
+	}
+	public static List<Vector3D> GetVectors() {
+		List<Vector3D> vectors = new List<Vector3D> {Vector3D.Zero, Vector3D.Zero, Vector3D.Zero};
+		if (CurrentTarget != null) {
+			vectors[0] = CurrentTarget.PositionEstimate;
+			vectors[1] = CurrentTarget.VelocityEstimate;
+			vectors[2] = CurrentTarget.Acceleration;
+		}
+		return vectors;
+	}
+
+
+
+	//// PRIVATE METHODS ////
+	static void Track(Target target) {
+		if (CameraBlocks.Count() == 0) return;
+		
+		Vector3D jitter = new Vector3D(Rand.NextDouble() - 0.5, Rand.NextDouble() - 0.5, Rand.NextDouble() - 0.5) * target.Size;
+		Vector3D newPosition = target.PositionEstimate + jitter * TrackingJitterScale;
+		
+		IMyCameraBlock camera = CameraBlocks[currentCamera];
+		double syncDelay = target.Distance / 2000.0 / CameraBlocks.Count;
+		if ((DateTime.Now - lastScan).TotalSeconds < syncDelay) return;
+		
+		Target newTarget = new Target(camera.Raycast(camera.AvailableScanRange, Base.VectorToBlockSpace(newPosition, camera)));
+		currentCamera = (currentCamera + 1) % CameraBlocks.Count;
+		lastScan = DateTime.Now;
+		if (newTarget.Id == target.Id) {
+			target.Size = newTarget.Size;
+			target.Position = newTarget.Position;
+			target.Acceleration = (newTarget.Velocity - target.Velocity) / (newTarget.LastDetected - target.LastDetected).TotalSeconds;
+			target.Velocity = newTarget.Velocity;
+			target.LastDetected = DateTime.Now;
 		}
 	}
 }
