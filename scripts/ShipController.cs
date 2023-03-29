@@ -8,11 +8,12 @@ Program () {
 	// Initialize classes
 	Base.Init(this); // Always init Base first!
 	ShipControl.Init(this, Base.GridBlocks);
+	//RoverControl.Init(this, Base.GridBlocks);
 	RotorControl.Init(this, Base.ConstructBlocks);
-	MissileLauncher.Init(this, Base.GridBlocks);
 	SolarControl.Init(this, Base.ConstructBlocks);
 	TargetTracking.Init(this, Base.GridBlocks);
-	//RoverControl.Init(this, Base.GridBlocks);
+	Ballistics.Init(this, Base.GridBlocks);
+	MissileLauncher.Init(this, Base.GridBlocks);
 	
 	// Change settings
 	Base.Title = "Ship Control";
@@ -20,9 +21,12 @@ Program () {
 	Base.DisplayOutput(Base.GroupBlocks.OfType<IMyCockpit>(), surfaceId:0);
 	Echo("Output displays: " + Base.OutputDisplays.Count);
 	Base.SetLCDTheme(Base.GroupBlocks, Color.Yellow, Color.Black);
+	
 	ShipControl.GyroMaxDelta = 0.1;
 	ShipControl.MaxShipSpeed = 100.0;
 	TargetTracking.PingEnabled = true;
+	//Ballistics.ProjectileVelocity = 500.0;
+	//Ballistics.ProjectileHasGravity = true;
 	
 	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
@@ -39,22 +43,13 @@ void Main(string argument) {
 		}
 
 		else if (argument == "faster") {
-			if (ShipControl.MaxShipSpeed == 1.0) ShipControl.MaxShipSpeed = 5.0;
-			else if (ShipControl.MaxShipSpeed == 5.0) ShipControl.MaxShipSpeed = 30.0;
-			else if (ShipControl.MaxShipSpeed == 30.0) ShipControl.MaxShipSpeed = 80.0;
-			else ShipControl.MaxShipSpeed = 100.0;
+			ShipControl.MaxShipSpeed *= 2.0;
+			if (ShipControl.MaxShipSpeed > 100.0) ShipControl.MaxShipSpeed = 100.0;
 		}
 
 		else if (argument == "slower") {
-			if (ShipControl.MaxShipSpeed == 100.0) ShipControl.MaxShipSpeed = 80.0;
-			else if (ShipControl.MaxShipSpeed == 80.0) ShipControl.MaxShipSpeed = 30.0;
-			else if (ShipControl.MaxShipSpeed == 30.0) ShipControl.MaxShipSpeed = 5.0;
-			else if (ShipControl.MaxShipSpeed == 5.0) ShipControl.MaxShipSpeed = 1.0;
-			else ShipControl.MaxShipSpeed = 1.0;
-		}
-
-		else if (argument == "gravity") {
-			CancelGravity = !CancelGravity;
+			ShipControl.MaxShipSpeed *= 0.5;
+			if (ShipControl.MaxShipSpeed < 0.78125) ShipControl.MaxShipSpeed = 0.78125; // = 100.0 / 128
 		}
 
 		else if (argument == "target") {
@@ -69,7 +64,7 @@ void Main(string argument) {
 			SolarControl.Update();
 			RotorControl.Update();
 			
-			ShipControl.NormalFlight(0.03, cancelGravity:CancelGravity);
+			ShipControl.NormalFlight();
 			//ShipControl.ExperimentalFlight();
 			//RoverControl.Drive();
 			
@@ -78,20 +73,21 @@ void Main(string argument) {
 				var controller = ShipControl.Controllers.FirstOrDefault();
 				if (controller != null) {
 					var vectors = TargetTracking.GetVectors();
+					Ballistics.Evaluate(ref targetLead, vectors[0], vectors[1], vectors[2]);
 					var relativePos = vectors[0] - controller.GetPosition();
 					var relativeVel = vectors[1] - controller.GetShipVelocities().LinearVelocity;
 					var gravity = controller.GetNaturalGravity();
-					var targetLead = CalculateLead(relativePos, relativeVel, vectors[2] - gravity); // remove gravity if no bullet drop
 					ShipControl.SetAngle(relativePos + targetLead, -gravity, response: 0.2);
-					var angularCorrectionVel = Vector3D.Cross(controller.WorldMatrix.Forward, relativeVel / relativePos.Length()) * 0.5;
-					ShipControl.AddRotation(angularCorrectionVel, response: 0.2);
+					var angularCorrectionVel = Base.GetRotation(relativePos, relativePos + Vector3D.Reject(relativeVel, controller.WorldMatrix.Forward));
+					//var angularCorrectionVel = Vector3D.Cross(controller.WorldMatrix.Forward, Vector3D.Reject(controller.WorldMatrix.Forward, relativeVel));
+					//angularCorrectionVel.Normalize();
+					//angularCorrectionVel *= (relativeVel.Length() / relativePos.Length());
+					ShipControl.AddRotation(angularCorrectionVel * 0.5, response: 1);
 				}
 			}
-			else {
-				Base.Print("Range: " + TargetTracking.GetRange());
-			}
+			else Base.Print("Range: " + TargetTracking.GetRange());
 			
-			// Call Base.ProcessorLoad last, anything after wont be taken into account.
+			// Call Base.ProcessorLoad last for an accurate readout.
 			Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
 		}
 
@@ -101,33 +97,14 @@ void Main(string argument) {
 
 
 
-
-
-static double projectileVelocity = 400.0;
-static int calculations = 16;
-static int launchDelayFrames = 2;
-static Vector3D CalculateLead(Vector3D position, Vector3D velocity, Vector3D acceleration) {
-	double time = 0;
-	Vector3D lead = Vector3D.Zero;
-	for (int i = 0; i < calculations; i++) {
-		time = (position + lead).Length() / projectileVelocity + launchDelayFrames * Base.DeltaTime;
-		lead = velocity * time + acceleration * Math.Pow(time, 2) * 0.5;
-	}
-	return lead;
-}
-
-
-
-
-
 //// STATE ////
-bool CancelGravity = true;
+Vector3D targetLead = Vector3D.Zero;
 
 
 
 //// CLASSES ////
 static class Base {
-	public static readonly DateTime Version = new DateTime(2023, 03, 28, 03, 56, 00);
+	public static readonly DateTime Version = new DateTime(2023, 03, 29, 08, 04, 00);
 
 
 
@@ -331,17 +308,17 @@ static class Base {
 	}
 	public static void SetGyroVelocity(IMyGyro gyro, Vector3D velocity) {
 		// Keen coded the override for gyros backwards because Yes.
-		Vector3 v = -Base.DirectionToBlockSpace(velocity, gyro);
-		gyro.Pitch = v.X;
-		gyro.Yaw = v.Y;
-		gyro.Roll = v.Z;
+		Vector3 v = Base.DirectionToBlockSpace(velocity, gyro);
+		gyro.Pitch = -v.X;
+		gyro.Yaw = -v.Y;
+		gyro.Roll = -v.Z;
 	}
 	public static void AddGyroVelocity(IMyGyro gyro, Vector3D velocity) {
 		// Keen coded the override for gyros backwards because Yes.
-		Vector3 v = -Base.DirectionToBlockSpace(velocity, gyro);
-		gyro.Pitch += v.X;
-		gyro.Yaw += v.Y;
-		gyro.Roll += v.Z;
+		Vector3 v = Base.DirectionToBlockSpace(velocity, gyro);
+		gyro.Pitch -= v.X;
+		gyro.Yaw -= v.Y;
+		gyro.Roll -= v.Z;
 	}
 	// Get property value by name, as defined in block CustomData.
 	public static T GetBlockProperty<T>(IMyTerminalBlock block, string propertyName, T defaultValue) {
@@ -416,10 +393,10 @@ static class Base {
 		from = Vector3D.Normalize(from);
 		to = Vector3D.Normalize(to);
 		double angle = Math.Acos(Vector3D.Dot(from, to));
-		Vector3D axis = Vector3D.Normalize(Vector3D.Cross(to, from));
+		Vector3D axis = Vector3D.Normalize(Vector3D.Cross(from, to));
 		Vector3D result = axis * angle;
 		if (double.IsNaN(result.X)) return Vector3D.Zero;
-		else return axis * angle;
+		else return result;
 	}
 		// Limit a vector between a minimum and a maximum length.
 	public static Vector3D Clamp(Vector3D vec, double min, double max) {
@@ -502,7 +479,7 @@ static class Base {
 	}
 }
 static class ShipControl {
-	public static readonly DateTime Version = new DateTime(2023, 03, 28, 04, 13, 00);
+	public static readonly DateTime Version = new DateTime(2023, 03, 29, 07, 03, 00);
 
 
 
@@ -655,18 +632,18 @@ static class ShipControl {
 		lastTargetFwd = targetFwd;
 		lastTargetUp = targetUp;
 	}
-	public static void NormalFlight(double response = 0.5, double gyroResponse = 0.1, bool cancelGravity = true) {
+	public static void NormalFlight(double response = 0.02, double gyroResponse = 0.1, bool cancelGravity = true) {
 		if (Controllers.Count == 0) Base.Throw("Ship has no controller");
 		gyroResponse = Base.Clamp(gyroResponse, 0.0, 1.0);
 		response = Base.Clamp(response, 0.0, 1.0);
 		
 		List<Vector3D> input = Base.GetInput(Controllers, true);
 		
-		SetRotation(input[1] * 2 * Math.PI, gyroResponse);
+		SetRotation(input[1] * 2.0 * Math.PI, gyroResponse);
 		if (Controllers[0].DampenersOverride == false) SetThrust(input[0], cancelGravity);
 		else SetVelocity(input[0] * MaxShipSpeed, response, cancelGravity);
 	}
-	public static void CentripetalFlight(double response = 0.5, double gyroResponse = 0.1, bool cancelGravity = true) {
+	public static void CentripetalFlight(double response = 0.02, double gyroResponse = 0.1, bool cancelGravity = true) {
 		if (Controllers.Count == 0) Base.Throw("Ship has no controller");
 		gyroResponse = Base.Clamp(gyroResponse, 0.0, 1.0);
 		response = Base.Clamp(response, 0.0, 1.0);
@@ -681,7 +658,7 @@ static class ShipControl {
 		else SetVelocity(input[0] * MaxShipSpeed, response, cancelGravity);
 		AddAcceleration(centripetalAcceleration);
 	}
-	public static void ExperimentalFlight(double response = 0.1, double gyroResponse = 0.1, bool cancelGravity = true) {
+	public static void ExperimentalFlight(double response = 0.02, double gyroResponse = 0.1, bool cancelGravity = true) {
 		if (Controllers.Count == 0) Base.Throw("Ship has no controller");
 		
 		List<Vector3D> input = Base.GetInput(Controllers, true);
@@ -727,7 +704,6 @@ static class ShipControl {
 		return false;
 	}
 	
-	
 	//// MANUAL PILOTING ////
 	public static void SetAngle(Vector3D targetForward, Vector3D? targetUp = null, double response = 0.1) {
 		if (Controllers.Count == 0) Base.Throw("SetAngle failed: Ship has no controller");
@@ -739,7 +715,7 @@ static class ShipControl {
 		if (targetUp != null) rollDelta = forward * Vector3D.Dot(forward, Base.GetRotation(up, targetUp.Value));
 		Vector3D targetVelocity = (pitchYawDelta + rollDelta) * 0.5 / Base.DeltaTime;
 		Vector3D velocity = Controllers[0].GetShipVelocities().AngularVelocity;
-		SetRotation(targetVelocity * -response - velocity * velocity.Length());
+		SetRotation(targetVelocity * response - velocity * velocity.Length());
 	}
 	public static void SetAngle(MatrixD orientation, double response = 0.1) {
 		SetAngle(orientation.Forward, orientation.Up, response);
@@ -748,7 +724,7 @@ static class ShipControl {
 		response = Base.Clamp(response, 0.0, 1.0);
 		if (Controllers.Count != 0) {
 			Vector3D myVelocity = Controllers[0].GetShipVelocities().AngularVelocity;
-			velocity = Base.Clamp((velocity - myVelocity) * response, 0.0, GyroMaxDelta) + myVelocity;
+			velocity = Base.Clamp((velocity - myVelocity) * response, GyroMaxDelta) + myVelocity;
 		}
 		foreach (var gyro in Gyroscopes) Base.SetGyroVelocity(gyro, velocity);
 	}
@@ -762,7 +738,7 @@ static class ShipControl {
 		/*response = Base.Clamp(response, 0.0, 1.0);
 		if (Controllers.Count != 0) {
 			Vector3D myVelocity = Controllers[0].GetShipVelocities().AngularVelocity;
-			velocity = Base.Clamp((velocity - myVelocity) * response, 0.0, GyroMaxDelta) + myVelocity;
+			velocity = Base.Clamp((velocity - myVelocity) * response, GyroMaxDelta) + myVelocity;
 		}*/
 		foreach (var gyro in Gyroscopes) Base.AddGyroVelocity(gyro, velocity);
 	}
@@ -959,7 +935,7 @@ static class MissileLauncher {
 	}
 }
 static class SolarControl {
-	public static readonly DateTime Version = new DateTime(2023, 03, 27);
+	public static readonly DateTime Version = new DateTime(2023, 03, 29, 02, 38, 00);
 
 
 
@@ -1027,8 +1003,8 @@ static class SolarControl {
 	static double lastAlignmentScore = 0.0;
 	static double directionSwitchCooldown = 0.0;
 	static double directionExpireTimer = 0.0;
-	public static HashSet<IMySolarPanel> solarPanels = new HashSet<IMySolarPanel>();
-	public static HashSet<IMyMotorStator> rotors = new HashSet<IMyMotorStator>();
+	static HashSet<IMySolarPanel> solarPanels = new HashSet<IMySolarPanel>();
+	static HashSet<IMyMotorStator> rotors = new HashSet<IMyMotorStator>();
 
 
 
@@ -1242,4 +1218,44 @@ static class TargetTracking {
 		}
 	}
 }
+static class Ballistics {
+	public static readonly DateTime Version = new DateTime(2023, 03, 29, 07, 48, 00);
 
+
+
+	//// PUBLIC SETTINGS ////
+	public static double ProjectileVelocity = 400.0;
+	public static bool ProjectileHasGravity = true;
+	public static int LaunchDelay = 2; //frames
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		program.Echo("Initializing SolarControl");
+		program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		programmableBlock = program.Me;
+		controller = blocks.OfType<IMyShipController>().FirstOrDefault();
+		program.Echo("    Controller: " + (controller == null ? "No, self-velocity compensation disabled" : "Yes"));
+		program.Echo("    Controller: " + (true ? "No, self-velocity compensation disabled" : "Yes"));
+	}
+	public static void Update() {}
+	public static void Evaluate(ref Vector3D targetLead, Vector3D targetPos, Vector3D targetVel, Vector3D targetAcc) {
+		if (controller != null) {
+			targetPos -= controller.GetPosition();
+			targetVel -= controller.GetShipVelocities().LinearVelocity;
+			if (ProjectileHasGravity) targetAcc -= controller.GetNaturalGravity();
+		}
+		else targetPos -= programmableBlock.GetPosition();
+		var travelTime = (targetPos + targetLead).Length() / ProjectileVelocity + LaunchDelay * Base.DeltaTime;
+		targetLead = targetVel * travelTime + targetAcc * Math.Pow(travelTime, 2) * 0.5;
+	}
+
+
+
+	//// PRIVATE DATA ////
+	static IMyProgrammableBlock programmableBlock = null;
+	static IMyShipController controller = null;
+}
