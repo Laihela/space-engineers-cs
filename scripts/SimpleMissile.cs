@@ -9,6 +9,8 @@ Program () {
 	Base.Init(this); // Always init Base first!
 	ShipControl.Init(this, Base.GridBlocks);
 	SimpleMissile.Init(this, Base.GridBlocks);
+	TargetTracking.Init(this, Base.GridBlocks);
+	Ballistics.Init(this, Base.GridBlocks);
 	
 	// Change settings
 	Base.Title = "Simple Missile";
@@ -18,6 +20,7 @@ Program () {
 	ShipControl.APPROACH_SLOW_DOWN = 30.0;
 	SimpleMissile.DropTime = 0.5f;
 	SimpleMissile.DeployAntennaRange = 20000;
+	Ballistics.ProjectileVelocity = ShipControl.MaxShipSpeed;
 	
 	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
@@ -25,36 +28,76 @@ Program () {
 
 
 
+//// SETTINGS ////
+Vector3D DropVector = Vector3D.Down * 0.5 + Vector3D.Forward;
+double TurretJukeSpeed = 0.5; // Hertz
+double TurretJukeRadius = 0.2; // Meters
+
+
+
 //// EXECUTION ////
 void Main(string argument, UpdateType updateType) {
 	try {
-
-		Base.Update(); // Always update Base first!
-		ShipControl.Update();
-		SimpleMissile.Update();
 
 		if (argument.ToLower().Contains("gps")) {
 			string[] bits = argument.Split(':');
 			if (bits.Length > 4) {
 				guidance = "gps";
-				target = new Vector3D(double.Parse(bits[2]), double.Parse(bits[3]), double.Parse(bits[4]));
+				gpsTarget = new Vector3D(double.Parse(bits[2]), double.Parse(bits[3]), double.Parse(bits[4]));
 				SimpleMissile.Deploy();
 			}
 			else Base.Warn("Incorrect GPS format: " + argument);
 		}
 
-		if (SimpleMissile.IsDeployed && SimpleMissile.DropTime < 0.001) {
-			if (guidance == "gps") {
-				Vector3D targetDirection = target - SimpleMissile.Warhead.GetPosition();
-				ShipControl.SetVelocity(ShipControl.Controllers[0].WorldMatrix.Forward);
-				ShipControl.SetAngle(Vector3D.Normalize(targetDirection));
-				if (targetDirection.Length() < 5.0) SimpleMissile.Warhead.Detonate();
+		else if (argument != "") {
+			TargetTracking.ConsiderTarget(argument);
+			if (TargetTracking.CurrentTarget != null) {
+				if (ShipControl.Controllers.Count == 0) Base.Throw("Raydar guidance requires a control block!");
+				guidance = "raydar";
+				SimpleMissile.Deploy();
 			}
-			else ShipControl.CentripetalFlight(0.02);
 		}
 
-		// Call Base.ProcessorLoad last, anything after wont be taken into account.
-		Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
+		else {
+			Base.Update(); // Always update Base first!
+			ShipControl.Update();
+			SimpleMissile.Update();
+			TargetTracking.Update();
+			Ballistics.Update();
+
+			if (SimpleMissile.IsDeployed) {
+				if (SimpleMissile.DropTime > 0.0) ShipControl.SetThrust(DropVector);
+				else if (guidance == "raydar") {
+					var targetPosition = TargetTracking.CurrentTarget.PositionEstimate - ShipControl.Controllers.FirstOrDefault().GetPosition();
+					var targetVelocity = TargetTracking.CurrentTarget.VelocityEstimate;
+					var targetAcceleration = TargetTracking.CurrentTarget.Acceleration;
+					Ballistics.Evaluate(ref targetLead, targetPosition, targetVelocity, targetAcceleration);
+					var targetDistance = (targetPosition + targetLead).Length();
+					var targetDirection = (targetPosition + targetLead) / targetDistance;
+					jukeAngle += TurretJukeSpeed * Math.PI * 2.0 * Base.DeltaTime;
+					var turretJuke = TurretJukeRadius * Base.Clamp(1.0 - targetDistance / 800.0, 0.0, 1.0) * (Vector3D)(Quaternion.CreateFromAxisAngle(targetDirection, (float)jukeAngle).Right);
+					
+					ShipControl.SetAngle(targetDirection + turretJuke);
+					ShipControl.SetVelocity(ShipControl.Controllers[0].WorldMatrix.Forward * ShipControl.MaxShipSpeed);
+					if (targetDistance < 5.0 || TargetTracking.CurrentTarget == null) SimpleMissile.Warhead.Detonate();
+				}
+				else if (guidance == "gps") {
+					var relativeTargetPosition = gpsTarget - SimpleMissile.Warhead.GetPosition();
+					var targetDistance = relativeTargetPosition.Length();
+					var targetDirection = relativeTargetPosition / targetDistance;
+					jukeAngle += TurretJukeSpeed * Math.PI * 2.0 * Base.DeltaTime;
+					var turretJuke = TurretJukeRadius * Base.Clamp(1.0 - targetDistance / 800.0, 0.0, 1.0) * (Vector3D)(Quaternion.CreateFromAxisAngle(targetDirection, (float)jukeAngle).Right);
+					
+					ShipControl.SetAngle(targetDirection + turretJuke);
+					ShipControl.SetVelocity(ShipControl.Controllers[0].WorldMatrix.Forward * ShipControl.MaxShipSpeed);
+					if (targetDistance < 5.0) SimpleMissile.Warhead.Detonate();
+				}
+				else ShipControl.CentripetalFlight(0.1, 0.3);
+			}
+
+			// Call Base.ProcessorLoad last, anything after wont be taken into account.
+			Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
+		}
 
 	}
 	catch (System.Exception exception) { Base.Throw(exception); }
@@ -64,13 +107,15 @@ void Main(string argument, UpdateType updateType) {
 
 //// STATE ////
 string guidance = "manual";
-Vector3D target = Vector3D.Zero;
+double jukeAngle = 0.0;
+Vector3D gpsTarget = Vector3D.Zero;
+Vector3D targetLead = Vector3D.Zero;
 
 
 
 //// CLASSES ////
 static class Base {
-	public static readonly DateTime Version = new DateTime(2022, 09, 17, 01, 38, 00);
+	public static readonly DateTime Version = new DateTime(2023, 03, 29, 08, 04, 00);
 
 
 
@@ -88,76 +133,87 @@ static class Base {
 	public static HashSet<IMyTextSurface> OutputDisplays = new HashSet<IMyTextSurface>();
 	// DeltaTime remains consistent with simulation speed changes.
 	public static double DeltaTime { get {
-		return Program.Runtime.TimeSinceLastRun.TotalSeconds;
+		return _program.Runtime.TimeSinceLastRun.TotalSeconds;
 	}}
 	// Real-time seconds between updates, will increase if simulation speed drops.
 	public static double RealDeltaTime { get {
-		return realDeltaTime;
+		return _realDeltaTime;
 	}}
 	// Ratio of currently used program instructions to max allowed instructions. (0 to 1)
 	public static double ProcessorLoad { get {
-		return (double)Program.Runtime.CurrentInstructionCount / Program.Runtime.MaxInstructionCount;
+		return (double)_program.Runtime.CurrentInstructionCount / _program.Runtime.MaxInstructionCount;
 	}}
 
 
 
 	//// PRIVATE DATA ////
-	static MyGridProgram Program;
-	static DateTime lastUpdate = DateTime.Now;
-	static double realDeltaTime = 0.0;
-	static string symbol = "";
-	static StringBuilder printBuilder = new StringBuilder();
-	static StringBuilder warnBuilder = new StringBuilder();
-	static Color contentColor = new Color(179, 237, 255);
-	static Color backgroundColor = new Color(0, 88, 151);
+	static MyGridProgram _program;
+	static bool _isInitialized = false;
+	static DateTime _lastUpdate = DateTime.Now;
+	static double _realDeltaTime = 0.0;
+	static string _symbol = "";
+	static StringBuilder _printBuffer = new StringBuilder();
+	static StringBuilder _warnBuffer = new StringBuilder();
+	static Color _contentColor = new Color(179, 237, 255);
+	static Color _backgroundColor = new Color(0, 88, 151);
 
 
 
 	//// PUBLIC METHODS ////
 	// Remember to call this first, before all other classes.
 	public static void Init(MyGridProgram program) {
-		Program = program;
-		Program.Echo("Initializing Base");
-		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		_program = program;
+		_program.Echo("Initializing Base");
+		_program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
 		
 		GetGroups();
 		GetBlocks();
 		ReadProperties();
 		
-		Program.Echo("    ConstructTerminalBlocks: " + ConstructBlocks.Count);
-		Program.Echo("    GroupTerminalBlocks: " + GroupBlocks.Count);
-		Program.Echo("    GridTerminalBlocks: " + GridBlocks.Count);
-		Program.Echo("    MyBlockGroups: " + MyBlockGroups.Count);
+		_program.Echo("    ConstructTerminalBlocks: " + ConstructBlocks.Count);
+		_program.Echo("    GroupTerminalBlocks: " + GroupBlocks.Count);
+		_program.Echo("    GridTerminalBlocks: " + GridBlocks.Count);
+		_program.Echo("    MyBlockGroups: " + MyBlockGroups.Count);
 		
-		//Program.Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
-		//SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
-		DisplayOutput(Program.Me.GetSurface(0));
-		SetLCDTheme(Program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
-		DisplayKeyboard(Program.Me.GetSurface(1));
+		//_program.Me.GetSurface(0).ContentType = ContentType.TEXT_AND_IMAGE;
+		//SetLCDTheme(_program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
+		DisplayOutput(_program.Me.GetSurface(0));
+		SetLCDTheme(_program.Me, new Color(128, 255, 0), new Color(0, 0, 0), 1f, 2f);
+		DisplayKeyboard(_program.Me.GetSurface(1));
+		_isInitialized = true;
 	}
 	// Call this first, every frame.
 	public static void Update() {
+		AssertInit();
 		FlushOutput();
-		Print($"{Title} {symbol}");
-		realDeltaTime = (DateTime.Now - lastUpdate).TotalSeconds;
-		lastUpdate = DateTime.Now;
+		Print($"{Title} {_symbol}");
+		_realDeltaTime = (DateTime.Now - _lastUpdate).TotalSeconds;
+		_lastUpdate = DateTime.Now;
 		UpdateSymbol();
 	}
 	// Write text to all output displays.
-	public static void Print(object message) {
+	public static void Print(string message) {
+		AssertInit();
 		//foreach (var display in OutputDisplays) display.WriteText(message.ToString() + "\n", true);
-		printBuilder.Append(message).Append('\n');
+		_printBuffer.Append(message).Append('\n');
+	}
+	public static void Print(object message) {
+		Print(message.ToString());
 	}
 	public static void Warn (object message) {
-		warnBuilder.Append(message).Append('\n');
+		_warnBuffer.Append(message).Append('\n');
 	}
 	// Write an error message to all output displays and stop the program.
 	public static void Throw(object message) {
 		Print("ERR: " + message.ToString());
 		FlushOutput();
-		SetLCDTheme(Program.Me, new Color(0, 0, 0), new Color(255, 0, 0));
+		SetLCDTheme(_program.Me, new Color(0, 0, 0), new Color(255, 0, 0));
 		SetLCDTheme(OutputDisplays, new Color(0, 0, 0), new Color(255, 0, 0));
 		throw new System.Exception(message.ToString());
+	}
+	// Make sure that Init() has been called, if not, throw an error.
+	public static void AssertInit() {
+		if (_isInitialized == false) throw new System.Exception($"Class has not been initialized!");
 	}
 
 
@@ -214,7 +270,7 @@ static class Base {
 		));
 	}
 	// Change colors and set font to Monospace on a display. Also works for list if displays, a block, or a list of blocks.
-	public static void SetLCDTheme(object target, Color? contentColor = null, Color? backgroundColor = null, float fontSize = -1f, float textPadding = -1f) {
+	public static void SetLCDTheme(object target, Color? _contentColor = null, Color? _backgroundColor = null, float fontSize = -1f, float textPadding = -1f) {
 		
 		// Cases should be ordered from most specific to least specific, then from least
 		// recursive to most recursive, and then from most used to least used for best performance.
@@ -222,8 +278,8 @@ static class Base {
 		// Case: target is single display.
 		var display = target as IMyTextSurface;
 		if (display != null) {
-			Color content = contentColor.GetValueOrDefault(new Color(179, 237, 255));
-			Color background = backgroundColor.GetValueOrDefault(new Color(0, 88, 151));
+			Color content = _contentColor.GetValueOrDefault(new Color(179, 237, 255));
+			Color background = _backgroundColor.GetValueOrDefault(new Color(0, 88, 151));
 			display.ScriptBackgroundColor = background;
 			display.ScriptForegroundColor = content;
 			display.BackgroundColor = background;
@@ -238,14 +294,14 @@ static class Base {
 		// Case: target is a single block (and has displays), call recursively for each display. (1 layer recursion)
 		var block = target as IMyTextSurfaceProvider;
 		if (block != null) {
-			for(int x = 0; x < block.SurfaceCount; x++) SetLCDTheme(block.GetSurface(x), contentColor, backgroundColor, fontSize, textPadding);
+			for(int x = 0; x < block.SurfaceCount; x++) SetLCDTheme(block.GetSurface(x), _contentColor, _backgroundColor, fontSize, textPadding);
 			return;
 		}
 		
 		// Case: target is a collection, call recursively for each item. (1 or more layers of recursion depending on collection type)
 		var items = target as IEnumerable;
 		if (items != null) {
-			foreach (var x in items) SetLCDTheme(x, contentColor, backgroundColor, fontSize, textPadding);
+			foreach (var x in items) SetLCDTheme(x, _contentColor, _backgroundColor, fontSize, textPadding);
 			return;
 		}
 	}
@@ -263,10 +319,17 @@ static class Base {
 	}
 	public static void SetGyroVelocity(IMyGyro gyro, Vector3D velocity) {
 		// Keen coded the override for gyros backwards because Yes.
-		Vector3 v = -Base.DirectionToBlockSpace(velocity, gyro);
-		gyro.Pitch = v.X;
-		gyro.Yaw = v.Y;
-		gyro.Roll = v.Z;
+		Vector3 v = Base.DirectionToBlockSpace(velocity, gyro);
+		gyro.Pitch = -v.X;
+		gyro.Yaw = -v.Y;
+		gyro.Roll = -v.Z;
+	}
+	public static void AddGyroVelocity(IMyGyro gyro, Vector3D velocity) {
+		// Keen coded the override for gyros backwards because Yes.
+		Vector3 v = Base.DirectionToBlockSpace(velocity, gyro);
+		gyro.Pitch -= v.X;
+		gyro.Yaw -= v.Y;
+		gyro.Roll -= v.Z;
 	}
 	// Get property value by name, as defined in block CustomData.
 	public static T GetBlockProperty<T>(IMyTerminalBlock block, string propertyName, T defaultValue) {
@@ -341,10 +404,10 @@ static class Base {
 		from = Vector3D.Normalize(from);
 		to = Vector3D.Normalize(to);
 		double angle = Math.Acos(Vector3D.Dot(from, to));
-		Vector3D axis = Vector3D.Normalize(Vector3D.Cross(to, from));
+		Vector3D axis = Vector3D.Normalize(Vector3D.Cross(from, to));
 		Vector3D result = axis * angle;
 		if (double.IsNaN(result.X)) return Vector3D.Zero;
-		else return axis * angle;
+		else return result;
 	}
 		// Limit a vector between a minimum and a maximum length.
 	public static Vector3D Clamp(Vector3D vec, double min, double max) {
@@ -378,28 +441,28 @@ static class Base {
 
 	//// PRIVATE METHODS ////
 	static void UpdateSymbol() {
-		if       (symbol == "|")  symbol = "/";
-		else if  (symbol == "/")  symbol = "-";
-		else if  (symbol == "-")  symbol = "\\";
-		else                      symbol = "|";
+		if       (_symbol == "|")  _symbol = "/";
+		else if  (_symbol == "/")  _symbol = "-";
+		else if  (_symbol == "-")  _symbol = "\\";
+		else                      _symbol = "|";
 	}
 	static void GetGroups() {
 		List<IMyBlockGroup> blockGroups = new List<IMyBlockGroup>();
-		Program.GridTerminalSystem.GetBlockGroups(blockGroups);
+		_program.GridTerminalSystem.GetBlockGroups(blockGroups);
 		foreach(var blockGroup in blockGroups) {
 			List<IMyTerminalBlock> blocks = new List<IMyTerminalBlock>();
 			blockGroup.GetBlocks(blocks);
-			if (blocks.Contains(Program.Me) == false) continue;
+			if (blocks.Contains(_program.Me) == false) continue;
 			foreach (var block in blocks) GroupBlocks.Add(block);
 			MyBlockGroups.Add(blockGroup.Name, new HashSet<IMyTerminalBlock>(blocks));
 		}
 	}
 	static void GetBlocks() {
 		List<IMyTerminalBlock> terminalBlocks = new List<IMyTerminalBlock>();
-		Program.GridTerminalSystem.GetBlocks(terminalBlocks);
+		_program.GridTerminalSystem.GetBlocks(terminalBlocks);
 		foreach (var block in terminalBlocks) {
-			if (block.IsSameConstructAs(Program.Me)) ConstructBlocks.Add(block);
-			if (block.CubeGrid == Program.Me.CubeGrid) GridBlocks.Add(block);
+			if (block.IsSameConstructAs(_program.Me)) ConstructBlocks.Add(block);
+			if (block.CubeGrid == _program.Me.CubeGrid) GridBlocks.Add(block);
 		}
 		
 	}
@@ -422,12 +485,12 @@ static class Base {
 		}
 	}
 	static void FlushOutput() {
-		foreach (var display in OutputDisplays) display.WriteText(warnBuilder.ToString() + printBuilder.ToString());
-		printBuilder.Clear();
+		foreach (var display in OutputDisplays) display.WriteText(_warnBuffer.ToString() + _printBuffer.ToString());
+		_printBuffer.Clear();
 	}
 }
 static class ShipControl {
-	public static readonly DateTime Version = new DateTime(2022, 09, 16);
+	public static readonly DateTime Version = new DateTime(2023, 03, 29, 07, 03, 00);
 
 
 
@@ -580,18 +643,18 @@ static class ShipControl {
 		lastTargetFwd = targetFwd;
 		lastTargetUp = targetUp;
 	}
-	public static void NormalFlight(double response = 0.5, double gyroResponse = 0.1, bool cancelGravity = true) {
+	public static void NormalFlight(double response = 0.02, double gyroResponse = 0.1, bool cancelGravity = true) {
 		if (Controllers.Count == 0) Base.Throw("Ship has no controller");
 		gyroResponse = Base.Clamp(gyroResponse, 0.0, 1.0);
 		response = Base.Clamp(response, 0.0, 1.0);
 		
 		List<Vector3D> input = Base.GetInput(Controllers, true);
 		
-		SetRotation(input[1] * 2 * Math.PI, gyroResponse);
+		SetRotation(input[1] * 2.0 * Math.PI, gyroResponse);
 		if (Controllers[0].DampenersOverride == false) SetThrust(input[0], cancelGravity);
 		else SetVelocity(input[0] * MaxShipSpeed, response, cancelGravity);
 	}
-	public static void CentripetalFlight(double response = 0.5, double gyroResponse = 0.1, bool cancelGravity = true) {
+	public static void CentripetalFlight(double response = 0.02, double gyroResponse = 0.1, bool cancelGravity = true) {
 		if (Controllers.Count == 0) Base.Throw("Ship has no controller");
 		gyroResponse = Base.Clamp(gyroResponse, 0.0, 1.0);
 		response = Base.Clamp(response, 0.0, 1.0);
@@ -606,7 +669,7 @@ static class ShipControl {
 		else SetVelocity(input[0] * MaxShipSpeed, response, cancelGravity);
 		AddAcceleration(centripetalAcceleration);
 	}
-	public static void ExperimentalFlight(double response = 0.1, double gyroResponse = 0.1, bool cancelGravity = true) {
+	public static void ExperimentalFlight(double response = 0.02, double gyroResponse = 0.1, bool cancelGravity = true) {
 		if (Controllers.Count == 0) Base.Throw("Ship has no controller");
 		
 		List<Vector3D> input = Base.GetInput(Controllers, true);
@@ -652,7 +715,6 @@ static class ShipControl {
 		return false;
 	}
 	
-	
 	//// MANUAL PILOTING ////
 	public static void SetAngle(Vector3D targetForward, Vector3D? targetUp = null, double response = 0.1) {
 		if (Controllers.Count == 0) Base.Throw("SetAngle failed: Ship has no controller");
@@ -661,7 +723,7 @@ static class ShipControl {
 		Vector3D up = Controllers[0].WorldMatrix.Up;
 		Vector3D pitchYawDelta = Base.GetRotation(forward, targetForward);
 		Vector3D rollDelta = Vector3D.Zero;
-		if (targetUp != null) rollDelta = Base.GetRotation(up, targetUp.Value);
+		if (targetUp != null) rollDelta = forward * Vector3D.Dot(forward, Base.GetRotation(up, targetUp.Value));
 		Vector3D targetVelocity = (pitchYawDelta + rollDelta) * 0.5 / Base.DeltaTime;
 		Vector3D velocity = Controllers[0].GetShipVelocities().AngularVelocity;
 		SetRotation(targetVelocity * response - velocity * velocity.Length());
@@ -673,7 +735,7 @@ static class ShipControl {
 		response = Base.Clamp(response, 0.0, 1.0);
 		if (Controllers.Count != 0) {
 			Vector3D myVelocity = Controllers[0].GetShipVelocities().AngularVelocity;
-			velocity = Base.Clamp((velocity - myVelocity) * response, 0.0, GyroMaxDelta) + myVelocity;
+			velocity = Base.Clamp((velocity - myVelocity) * response, GyroMaxDelta) + myVelocity;
 		}
 		foreach (var gyro in Gyroscopes) Base.SetGyroVelocity(gyro, velocity);
 	}
@@ -683,12 +745,15 @@ static class ShipControl {
 		QuaternionD.CreateFromRotationMatrix(velocity).GetAxisAngle(out axis, out angle);
 		SetRotation(axis * angle, response);
 	}
-	/*public static void AddRotation(MatrixD velocity, double response = 1.0) { /// BROKEN ///
-		Vector3D euler = Vector3D.Zero;
-		MatrixD.GetEulerAnglesXYZ(ref velocity, out euler);
-		AddRotation(euler, response);
-	}*/
-	
+	public static void AddRotation(Vector3D velocity, double response = 1.0) {
+		/*response = Base.Clamp(response, 0.0, 1.0);
+		if (Controllers.Count != 0) {
+			Vector3D myVelocity = Controllers[0].GetShipVelocities().AngularVelocity;
+			velocity = Base.Clamp((velocity - myVelocity) * response, GyroMaxDelta) + myVelocity;
+		}*/
+		foreach (var gyro in Gyroscopes) Base.AddGyroVelocity(gyro, velocity);
+	}
+
 	public static void SetThrust(Vector3D input, bool cancelGravity = false) {
 		Vector3D gravity = Controllers.Count != 0 ? Controllers[0].GetNaturalGravity() : Vector3D.Zero;
 		foreach (var thrusterGroup in ThrusterGroups) {
@@ -738,7 +803,7 @@ static class ShipControl {
 	static Vector3D lastTargetUp = Vector3D.Zero;
 }
 static class SimpleMissile {
-	public static readonly DateTime Version = new DateTime(2023, 03, 20, 02, 26, 0);
+	public static readonly DateTime Version = new DateTime(2023, 03, 30, 20, 02, 0);
 
 
 
@@ -763,11 +828,11 @@ static class SimpleMissile {
 		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
 		
 		Controller = blocks.OfType<IMyRemoteControl>().FirstOrDefault();
-		Program.Echo("    Controller: " + (Controller != null));
+		Program.Echo("    Controller: " + (Controller == null ? "No" : "Yes"));
 		Connector = GetConnector();
-		Program.Echo("    Connector: " + (Connector != null));
+		Program.Echo("    Connector: " + (Connector == null ? "No" : "Yes"));
 		Warhead = blocks.OfType<IMyWarhead>().FirstOrDefault();
-		Program.Echo("    Warhead: " + (Warhead != null));
+		Program.Echo("    Warhead: " + (Warhead == null ? "No" : "Yes"));
 		
 		if (Program.Me.CustomData.Contains("SimpleMissile") == false) Program.Me.CustomData = "SimpleMissile\n" + Program.Me.CustomData;
 		Standby();
@@ -779,7 +844,7 @@ static class SimpleMissile {
 			if (Warhead != null) Warhead.IsArmed = true;
 			if (DropTime > 0.0) DropTime -= Base.RealDeltaTime;
 		}
-		else if (Controller.IsUnderControl) Deploy();
+		else if (Controller?.IsUnderControl == true) Deploy();
 	}
 	public static void Deploy() {
 		if (isDeployed) return;
@@ -838,5 +903,236 @@ static class SimpleMissile {
 		rotor.Displacement = (float)MaxRotorDisplacement;
 		isConnectorExtended = true;
 	}
+}
+static class TargetTracking {
+	public static readonly DateTime Version = new DateTime(2023, 03, 28, 04, 27, 00);
+
+
+
+	//// PUBLIC SETTINGS ////
+	public static double MissingTargetExpireTime = 3.0;
+	public static double NewTargetPriorityBias = 0.95;
+	public static double TrackingJitterScale = 1.0;
+	public static bool PingEnabled = false;
+	public static List<MyDetectedEntityType> IgnoreTargetTypes = new List<MyDetectedEntityType>() { MyDetectedEntityType.Asteroid, MyDetectedEntityType.Planet };
+
+
+
+	//// PUBLIC DATA ////
+	public static MyGridProgram Program;
+	public static List<IMyCameraBlock> CameraBlocks;
+	public static Target CurrentTarget = null;
+
+
+
+	//// PRIVATE DATA ////
+	static int currentCamera = 0;
+	static DateTime lastScan = DateTime.Now;
+	static Random Rand = new Random();
+	
+	public class Target {
+		public long Id = 0;
+		public double Size = 0.0;
+		public Vector3D Position = Vector3D.Zero;
+		public Vector3D Velocity = Vector3D.Zero;
+		public Vector3D Acceleration = Vector3D.Zero;
+		public DateTime LastDetected = DateTime.Now;
+		
+		public double BlindTime {
+			get { return (DateTime.Now - LastDetected).TotalSeconds; }
+		}
+		public double Distance {
+			get { return (Position - Program.Me.GetPosition()).Length(); }
+		}
+		public double Priority {
+			get { return Size / Distance / (BlindTime + 1); }
+		}
+		public bool IsValid {
+			get { return Size != 0; }
+		}
+		public Vector3D PositionEstimate {
+			get {
+				double time = BlindTime;
+				return Position + Velocity * time + Acceleration * time * time * 0.5;
+			}
+		}
+		public Vector3D VelocityEstimate {
+			get { return Velocity + Acceleration * BlindTime; }
+		}
+		
+		public Target() {}
+		
+		public Target(MyDetectedEntityInfo entityInfo) {
+			Id = entityInfo.EntityId;
+			Size = (entityInfo.BoundingBox.Max - entityInfo.BoundingBox.Min).AbsMin();
+			Position = entityInfo.BoundingBox.Center;
+			Velocity = entityInfo.Velocity;
+		}
+		
+		public string Serialize() {
+			return String.Join(":",
+				Id,
+				Size,
+				Position.X,
+				Position.Y,
+				Position.Z,
+				Velocity.X,
+				Velocity.Y,
+				Velocity.Z,
+				Acceleration.X,
+				Acceleration.Y,
+				Acceleration.Z,
+				LastDetected.Ticks
+			);
+		}
+		
+		public static Target Deserialize(string data) {
+			Target target = new Target();
+			string[] values = data.Split(new char[]{':'}, StringSplitOptions.RemoveEmptyEntries);
+			if (values.Count() != 12) {
+				Program.Echo($"TargetTracking.Target.Deserialize: incorrect data format! ({values.Count()} values)");
+				return target;
+			}
+			target.Id = long.Parse(values[0]);
+			target.Size = double.Parse(values[1]);
+			target.Position.X = double.Parse(values[2]);
+			target.Position.Y = double.Parse(values[3]);
+			target.Position.Z = double.Parse(values[4]);
+			target.Velocity.X = double.Parse(values[5]);
+			target.Velocity.Y = double.Parse(values[6]);
+			target.Velocity.Z = double.Parse(values[7]);
+			target.Acceleration.X = double.Parse(values[8]);
+			target.Acceleration.Y = double.Parse(values[9]);
+			target.Acceleration.Z = double.Parse(values[10]);
+			target.LastDetected = new DateTime(long.Parse(values[11]));
+			return target;
+		}
+	}
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		Program = program;
+		Program.Echo("Initializing TargetTracking");
+		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		CameraBlocks = blocks.OfType<IMyCameraBlock>().ToList();
+		Program.Echo("    CameraBlocks: " + CameraBlocks.Count);
+		foreach(IMyCameraBlock camera in CameraBlocks) camera.EnableRaycast = true;
+	}
+	// Call this every frame
+	public static void Update() {
+		if (CurrentTarget == null) {
+			foreach (var camera in CameraBlocks) camera.EnableRaycast = PingEnabled;
+			return;
+		}
+		foreach (var camera in CameraBlocks) camera.EnableRaycast = true;
+		Track(CurrentTarget);
+		if (CurrentTarget.BlindTime > MissingTargetExpireTime) CurrentTarget = null;
+	}
+	public static void ConsiderTarget(object target) {
+		Target newTarget;
+		if (target is Target) newTarget = (Target)target;
+		else if (target is MyDetectedEntityInfo) newTarget = new Target((MyDetectedEntityInfo)target);
+		else if (target is string) {
+			string data = (string)target;
+			if (data == "") newTarget = new Target();
+			else newTarget = Target.Deserialize(data);
+		}
+		else {
+			Program.Echo("TargetTracking.ConsiderTarget: invalid target type: " + target.GetType());
+			return;
+		}
+		if (newTarget.IsValid == false) return;
+		if (CurrentTarget == null) CurrentTarget = newTarget;
+		if (newTarget.LastDetected < CurrentTarget.LastDetected) return;
+		if (newTarget.Priority * NewTargetPriorityBias > CurrentTarget.Priority) CurrentTarget = newTarget;
+	}
+	public static void Ping() {
+		if (CameraBlocks.Count() == 0) return;
+		IMyCameraBlock camera = CameraBlocks[currentCamera];
+		var hit = camera.Raycast(camera.AvailableScanRange);
+		if (!IgnoreTargetTypes.Contains(hit.Type)) ConsiderTarget(hit);
+		currentCamera = (currentCamera + 1) % CameraBlocks.Count;
+	}
+	public static double GetRange() {
+		if (CameraBlocks.Count() == 0) return 0.0;
+		return CameraBlocks[currentCamera].AvailableScanRange;
+	}
+	public static List<Vector3D> GetVectors() {
+		List<Vector3D> vectors = new List<Vector3D> {Vector3D.Zero, Vector3D.Zero, Vector3D.Zero};
+		if (CurrentTarget != null) {
+			vectors[0] = CurrentTarget.PositionEstimate;
+			vectors[1] = CurrentTarget.VelocityEstimate;
+			vectors[2] = CurrentTarget.Acceleration;
+		}
+		return vectors;
+	}
+
+
+
+	//// PRIVATE METHODS ////
+	static void Track(Target target) {
+		if (CameraBlocks.Count() == 0) return;
+		
+		Vector3D jitter = new Vector3D(Rand.NextDouble() - 0.5, Rand.NextDouble() - 0.5, Rand.NextDouble() - 0.5) * target.Size;
+		Vector3D newPosition = target.PositionEstimate + jitter * TrackingJitterScale;
+		
+		IMyCameraBlock camera = CameraBlocks[currentCamera];
+		double syncDelay = target.Distance / 2000.0 / CameraBlocks.Count;
+		if ((DateTime.Now - lastScan).TotalSeconds < syncDelay) return;
+		
+		Target newTarget = new Target(camera.Raycast(camera.AvailableScanRange, Base.VectorToBlockSpace(newPosition, camera)));
+		currentCamera = (currentCamera + 1) % CameraBlocks.Count;
+		lastScan = DateTime.Now;
+		if (newTarget.Id == target.Id) {
+			target.Size = newTarget.Size;
+			target.Position = newTarget.Position;
+			target.Acceleration = (newTarget.Velocity - target.Velocity) / (newTarget.LastDetected - target.LastDetected).TotalSeconds;
+			target.Velocity = newTarget.Velocity;
+			target.LastDetected = DateTime.Now;
+		}
+	}
+}
+static class Ballistics {
+	public static readonly DateTime Version = new DateTime(2023, 03, 30, 20, 01, 00);
+
+
+
+	//// PUBLIC SETTINGS ////
+	public static double ProjectileVelocity = 400.0;
+	public static bool ProjectileHasGravity = true;
+	public static int LaunchDelay = 2; //frames
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		program.Echo("Initializing Ballistics");
+		program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		programmableBlock = program.Me;
+		controller = blocks.OfType<IMyShipController>().FirstOrDefault();
+		program.Echo("    Controller: " + (controller == null ? "No" : "Yes"));
+	}
+	public static void Update() {}
+	public static void Evaluate(ref Vector3D targetLead, Vector3D targetPos, Vector3D targetVel, Vector3D targetAcc) {
+		if (controller != null) {
+			targetPos -= controller.GetPosition();
+			targetVel -= controller.GetShipVelocities().LinearVelocity;
+			if (ProjectileHasGravity) targetAcc -= controller.GetNaturalGravity();
+		}
+		else targetPos -= programmableBlock.GetPosition();
+		var travelTime = (targetPos + targetLead).Length() / ProjectileVelocity + LaunchDelay * Base.DeltaTime;
+		targetLead = targetVel * travelTime + targetAcc * Math.Pow(travelTime, 2) * 0.5;
+	}
+
+
+
+	//// PRIVATE DATA ////
+	static IMyProgrammableBlock programmableBlock = null;
+	static IMyShipController controller = null;
 }
 

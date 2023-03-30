@@ -12,8 +12,9 @@ Program () {
 	RotorControl.Init(this, Base.ConstructBlocks);
 	SolarControl.Init(this, Base.ConstructBlocks);
 	TargetTracking.Init(this, Base.GridBlocks);
-	Ballistics.Init(this, Base.GridBlocks);
 	MissileLauncher.Init(this, Base.GridBlocks);
+	Ballistics.Init(this, Base.GridBlocks);
+	LaserCamera.Init(this, Base.GridBlocks);
 	
 	// Change settings
 	Base.Title = "Ship Control";
@@ -25,8 +26,7 @@ Program () {
 	ShipControl.GyroMaxDelta = 0.1;
 	ShipControl.MaxShipSpeed = 100.0;
 	TargetTracking.PingEnabled = true;
-	//Ballistics.ProjectileVelocity = 500.0;
-	//Ballistics.ProjectileHasGravity = true;
+	Ballistics.ProjectileVelocity = 500.0;
 	
 	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
@@ -38,8 +38,16 @@ Program () {
 void Main(string argument) {
 	try {
 
-		if (argument == "launchGPS") {
-			MissileLauncher.LaunchGPS();
+		if (argument == "launchgps") {
+			MissileLauncher.LaunchOne(Me.CustomData);
+		}
+
+		else if (argument == "launchactive") {
+			MissileLauncher.LaunchOne(TargetTracking.CurrentTarget?.Serialize());
+		}
+
+		else if (argument == "laser") {
+			Me.CustomData = LaserCamera.GetGPS();
 		}
 
 		else if (argument == "faster") {
@@ -897,42 +905,32 @@ static class RotorControl {
 	}
 }
 static class MissileLauncher {
-	public static readonly DateTime Version = new DateTime(2022, 09, 17, 00, 55, 0);
-
-
-
-	//// PUBLIC DATA ////
-	public static MyGridProgram Program;
-	public static HashSet<IMyMotorBase> Connectors = new HashSet<IMyMotorBase>();
+	public static readonly DateTime Version = new DateTime(2023, 03, 30, 20, 18, 0);
 
 
 
 	//// PUBLIC METHODS ////
 	// Remember to call this first
 	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
-		Program = program;
-		Program.Echo("Initializing SimpleMissile");
-		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
-		
-		Connectors = blocks.OfType<IMyMotorBase>().ToHashSet();
-		Program.Echo("    Connectors: " + Connectors.Count);
+		_program = program;
+		_program.Echo("Initializing SimpleMissile");
+		_program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
 	}
 	// Tries to launch one missile
-	public static void LaunchGPS() {
+	public static void LaunchOne(string targetData) {
 		List<IMyProgrammableBlock> computers = new List<IMyProgrammableBlock>();
-		Program.GridTerminalSystem.GetBlocksOfType(computers);
+		_program.GridTerminalSystem.GetBlocksOfType(computers);
 		foreach (var computer in computers) {
 			if (!computer.CustomData.Contains("SimpleMissile")) continue;
-			//string[] data = Program.Me.CustomData.Split('\n');
-			//string gps = data.Where(s => s.Contains("gps")).FirstOrDefault();
-			//if (gps == "") continue;
-			//var args = new List<TerminalActionParameter>{ TerminalActionParameter.Get("launchGPS : " + gps) };
-			//computer.ApplyAction("Run");
-			computer.TryRun(Program.Me.CustomData);
-			//computer.TryRun("");
+			computer.TryRun(targetData);
 			break;
 		}
 	}
+
+
+
+	//// PRIVATE DATA ////
+	static MyGridProgram _program;
 }
 static class SolarControl {
 	public static readonly DateTime Version = new DateTime(2023, 03, 29, 02, 38, 00);
@@ -1219,7 +1217,7 @@ static class TargetTracking {
 	}
 }
 static class Ballistics {
-	public static readonly DateTime Version = new DateTime(2023, 03, 29, 07, 48, 00);
+	public static readonly DateTime Version = new DateTime(2023, 03, 30, 20, 01, 00);
 
 
 
@@ -1233,13 +1231,12 @@ static class Ballistics {
 	//// PUBLIC METHODS ////
 	// Remember to call this first
 	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
-		program.Echo("Initializing SolarControl");
+		program.Echo("Initializing Ballistics");
 		program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
 		
 		programmableBlock = program.Me;
 		controller = blocks.OfType<IMyShipController>().FirstOrDefault();
-		program.Echo("    Controller: " + (controller == null ? "No, self-velocity compensation disabled" : "Yes"));
-		program.Echo("    Controller: " + (true ? "No, self-velocity compensation disabled" : "Yes"));
+		program.Echo("    Controller: " + (controller == null ? "No" : "Yes"));
 	}
 	public static void Update() {}
 	public static void Evaluate(ref Vector3D targetLead, Vector3D targetPos, Vector3D targetVel, Vector3D targetAcc) {
@@ -1259,3 +1256,50 @@ static class Ballistics {
 	static IMyProgrammableBlock programmableBlock = null;
 	static IMyShipController controller = null;
 }
+static class LaserCamera {
+	public static readonly DateTime Version = new DateTime(2023, 03, 30, 20, 06, 00);
+
+
+
+	//// PUBLIC SETTINGS ////
+	public static bool Enabled {
+		set { if (camera != null) camera.EnableRaycast = value; }
+		get { return camera == null ? false : camera.EnableRaycast; }
+	}
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		program.Echo("Initializing LaserCamera");
+		program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		camera = blocks.OfType<IMyCameraBlock>().Where(cam => cam.CustomData.Contains("LaserCamera")).FirstOrDefault();
+		if (camera == null) camera = blocks.OfType<IMyCameraBlock>().FirstOrDefault();
+		program.Echo("    Camera: " + (camera == null ? "No" : "Yes"));
+	}
+	
+	public static double GetRange() {
+		if (camera == null) return -1.0;
+		var detectedEntity = camera.Raycast(camera.AvailableScanRange, 0.0f, 0.0f);
+		if (detectedEntity.HitPosition == null) return -1.0;
+		else return (camera.GetPosition() - (Vector3D)detectedEntity.HitPosition).Length() / 1000.0;
+	}
+	
+	public static string GetGPS() {
+		if (camera == null) return "";
+		var detectedEntity = camera.Raycast(camera.AvailableScanRange, 0.0f, 0.0f);
+		if (detectedEntity.HitPosition == null) return "";
+		else {
+			var pos = detectedEntity.HitPosition.Value;
+			return $"GPS:LaserGPS:{pos.X}:{pos.Y}:{pos.Z}:#808080:";
+		}
+	}
+
+
+
+	//// PRIVATE DATA ////
+	static IMyCameraBlock camera = null;
+}
+
