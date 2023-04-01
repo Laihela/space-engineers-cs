@@ -15,6 +15,7 @@ Program () {
 	MissileLauncher.Init(this, Base.GridBlocks);
 	Ballistics.Init(this, Base.GridBlocks);
 	LaserCamera.Init(this, Base.GridBlocks);
+	WeaponSalvo.Init(this, Base.GridBlocks);
 	
 	// Change settings
 	Base.Title = "Ship Control";
@@ -27,6 +28,7 @@ Program () {
 	ShipControl.MaxShipSpeed = 100.0;
 	TargetTracking.PingEnabled = true;
 	Ballistics.ProjectileVelocity = 500.0;
+	WeaponSalvo.FireRate = WeaponSalvo.WeaponCount / 6.0; // For assault cannons
 	
 	Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
@@ -38,39 +40,13 @@ Program () {
 void Main(string argument) {
 	try {
 
-		if (argument == "launchgps") {
-			MissileLauncher.LaunchOne(Me.CustomData);
-		}
-
-		else if (argument == "launchactive") {
-			MissileLauncher.LaunchOne(TargetTracking.CurrentTarget?.Serialize());
-		}
-
-		else if (argument == "laser") {
-			Me.CustomData = LaserCamera.GetGPS();
-		}
-
-		else if (argument == "faster") {
-			ShipControl.MaxShipSpeed *= 2.0;
-			if (ShipControl.MaxShipSpeed > 100.0) ShipControl.MaxShipSpeed = 100.0;
-		}
-
-		else if (argument == "slower") {
-			ShipControl.MaxShipSpeed *= 0.5;
-			if (ShipControl.MaxShipSpeed < 0.78125) ShipControl.MaxShipSpeed = 0.78125; // = 100.0 / 128
-		}
-
-		else if (argument == "target") {
-			if (TargetTracking.CurrentTarget == null) TargetTracking.Ping();
-			else TargetTracking.CurrentTarget = null;
-		}
-
-		else {
+		if (argument == "") {
 			Base.Update(); // Always update Base first!
 			TargetTracking.Update();
 			ShipControl.Update();
 			SolarControl.Update();
 			RotorControl.Update();
+			WeaponSalvo.Update();
 			
 			ShipControl.NormalFlight();
 			//ShipControl.ExperimentalFlight();
@@ -87,9 +63,6 @@ void Main(string argument) {
 					var gravity = controller.GetNaturalGravity();
 					ShipControl.SetAngle(relativePos + targetLead, -gravity, response: 0.2);
 					var angularCorrectionVel = Base.GetRotation(relativePos, relativePos + Vector3D.Reject(relativeVel, controller.WorldMatrix.Forward));
-					//var angularCorrectionVel = Vector3D.Cross(controller.WorldMatrix.Forward, Vector3D.Reject(controller.WorldMatrix.Forward, relativeVel));
-					//angularCorrectionVel.Normalize();
-					//angularCorrectionVel *= (relativeVel.Length() / relativePos.Length());
 					ShipControl.AddRotation(angularCorrectionVel * 0.5, response: 1);
 				}
 			}
@@ -98,6 +71,22 @@ void Main(string argument) {
 			// Call Base.ProcessorLoad last for an accurate readout.
 			Base.Print("CPU: " + Base.ProcessorLoad.ToString("000.000%"));
 		}
+		else if (argument == "faster") {
+			ShipControl.MaxShipSpeed *= 2.0;
+			if (ShipControl.MaxShipSpeed > 100.0) ShipControl.MaxShipSpeed = 100.0;
+		}
+		else if (argument == "slower") {
+			ShipControl.MaxShipSpeed *= 0.5;
+			if (ShipControl.MaxShipSpeed < 0.78125) ShipControl.MaxShipSpeed = 0.78125; // = 100.0 / 128
+		}
+		else if (argument == "target") {
+			if (TargetTracking.CurrentTarget == null) TargetTracking.Ping();
+			else TargetTracking.CurrentTarget = null;
+		}
+		else if (argument == "launchgps") MissileLauncher.LaunchOne(Me.CustomData);
+		else if (argument == "launchactive") MissileLauncher.LaunchOne(TargetTracking.CurrentTarget?.Serialize());
+		else if (argument == "laser") Me.CustomData = LaserCamera.GetGPS() ?? Me.CustomData;
+		else if (argument == "quicklaunch") MissileLauncher.LaunchOne(TargetTracking.CurrentTarget?.Serialize() ?? LaserCamera.GetGPS());
 
 	}
 	catch (System.Exception exception) { Base.Throw(exception); }
@@ -1026,7 +1015,7 @@ static class SolarControl {
 	}
 }
 static class TargetTracking {
-	public static readonly DateTime Version = new DateTime(2023, 03, 28, 04, 27, 00);
+	public static readonly DateTime Version = new DateTime(2023, 04, 01, 18, 02, 00);
 
 
 
@@ -1040,8 +1029,6 @@ static class TargetTracking {
 
 
 	//// PUBLIC DATA ////
-	public static MyGridProgram Program;
-	public static List<IMyCameraBlock> CameraBlocks;
 	public static Target CurrentTarget = null;
 
 
@@ -1082,7 +1069,6 @@ static class TargetTracking {
 		}
 		
 		public Target() {}
-		
 		public Target(MyDetectedEntityInfo entityInfo) {
 			Id = entityInfo.EntityId;
 			Size = (entityInfo.BoundingBox.Max - entityInfo.BoundingBox.Min).AbsMin();
@@ -1106,27 +1092,26 @@ static class TargetTracking {
 				LastDetected.Ticks
 			);
 		}
-		
 		public static Target Deserialize(string data) {
-			Target target = new Target();
 			string[] values = data.Split(new char[]{':'}, StringSplitOptions.RemoveEmptyEntries);
 			if (values.Count() != 12) {
 				Program.Echo($"TargetTracking.Target.Deserialize: incorrect data format! ({values.Count()} values)");
-				return target;
+				return null;
 			}
-			target.Id = long.Parse(values[0]);
-			target.Size = double.Parse(values[1]);
-			target.Position.X = double.Parse(values[2]);
-			target.Position.Y = double.Parse(values[3]);
-			target.Position.Z = double.Parse(values[4]);
-			target.Velocity.X = double.Parse(values[5]);
-			target.Velocity.Y = double.Parse(values[6]);
-			target.Velocity.Z = double.Parse(values[7]);
-			target.Acceleration.X = double.Parse(values[8]);
-			target.Acceleration.Y = double.Parse(values[9]);
-			target.Acceleration.Z = double.Parse(values[10]);
-			target.LastDetected = new DateTime(long.Parse(values[11]));
-			return target;
+			else return new Target() {
+				Id = long.Parse(values[0]);
+				Size = double.Parse(values[1]);
+				Position.X = double.Parse(values[2]);
+				Position.Y = double.Parse(values[3]);
+				Position.Z = double.Parse(values[4]);
+				Velocity.X = double.Parse(values[5]);
+				Velocity.Y = double.Parse(values[6]);
+				Velocity.Z = double.Parse(values[7]);
+				Acceleration.X = double.Parse(values[8]);
+				Acceleration.Y = double.Parse(values[9]);
+				Acceleration.Z = double.Parse(values[10]);
+				LastDetected = new DateTime(long.Parse(values[11]));
+			}
 		}
 	}
 
@@ -1138,17 +1123,17 @@ static class TargetTracking {
 		Program = program;
 		Program.Echo("Initializing TargetTracking");
 		Program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
-		CameraBlocks = blocks.OfType<IMyCameraBlock>().ToList();
-		Program.Echo("    CameraBlocks: " + CameraBlocks.Count);
-		foreach(IMyCameraBlock camera in CameraBlocks) camera.EnableRaycast = true;
+		cameras = blocks.OfType<IMyCameraBlock>().ToList();
+		Program.Echo("    Cameras: " + cameras.Count);
+		foreach(IMyCameraBlock camera in cameras) camera.EnableRaycast = true;
 	}
 	// Call this every frame
 	public static void Update() {
 		if (CurrentTarget == null) {
-			foreach (var camera in CameraBlocks) camera.EnableRaycast = PingEnabled;
+			foreach (var camera in cameras) camera.EnableRaycast = PingEnabled;
 			return;
 		}
-		foreach (var camera in CameraBlocks) camera.EnableRaycast = true;
+		foreach (var camera in cameras) camera.EnableRaycast = true;
 		Track(CurrentTarget);
 		if (CurrentTarget.BlindTime > MissingTargetExpireTime) CurrentTarget = null;
 	}
@@ -1165,21 +1150,27 @@ static class TargetTracking {
 			Program.Echo("TargetTracking.ConsiderTarget: invalid target type: " + target.GetType());
 			return;
 		}
+		ConsiderTarget(newTarget);
+	}
+	public static void ConsiderTarget(string targetData) {
+		
+	}
+	public static void ConsiderTarget(Target newTarget) {
 		if (newTarget.IsValid == false) return;
 		if (CurrentTarget == null) CurrentTarget = newTarget;
 		if (newTarget.LastDetected < CurrentTarget.LastDetected) return;
 		if (newTarget.Priority * NewTargetPriorityBias > CurrentTarget.Priority) CurrentTarget = newTarget;
 	}
 	public static void Ping() {
-		if (CameraBlocks.Count() == 0) return;
-		IMyCameraBlock camera = CameraBlocks[currentCamera];
+		if (cameras.Count() == 0) return;
+		IMyCameraBlock camera = cameras[currentCamera];
 		var hit = camera.Raycast(camera.AvailableScanRange);
 		if (!IgnoreTargetTypes.Contains(hit.Type)) ConsiderTarget(hit);
-		currentCamera = (currentCamera + 1) % CameraBlocks.Count;
+		currentCamera = (currentCamera + 1) % cameras.Count;
 	}
 	public static double GetRange() {
-		if (CameraBlocks.Count() == 0) return 0.0;
-		return CameraBlocks[currentCamera].AvailableScanRange;
+		if (cameras.Count() == 0) return 0.0;
+		return cameras[currentCamera].AvailableScanRange;
 	}
 	public static List<Vector3D> GetVectors() {
 		List<Vector3D> vectors = new List<Vector3D> {Vector3D.Zero, Vector3D.Zero, Vector3D.Zero};
@@ -1193,19 +1184,24 @@ static class TargetTracking {
 
 
 
+	//// PRIVATE DATA ////
+	public static List<IMyCameraBlock> cameras;
+
+
+
 	//// PRIVATE METHODS ////
 	static void Track(Target target) {
-		if (CameraBlocks.Count() == 0) return;
+		if (cameras.Count() == 0) return;
 		
 		Vector3D jitter = new Vector3D(Rand.NextDouble() - 0.5, Rand.NextDouble() - 0.5, Rand.NextDouble() - 0.5) * target.Size;
 		Vector3D newPosition = target.PositionEstimate + jitter * TrackingJitterScale;
 		
-		IMyCameraBlock camera = CameraBlocks[currentCamera];
-		double syncDelay = target.Distance / 2000.0 / CameraBlocks.Count;
+		IMyCameraBlock camera = cameras[currentCamera];
+		double syncDelay = target.Distance / 2000.0 / cameras.Count;
 		if ((DateTime.Now - lastScan).TotalSeconds < syncDelay) return;
 		
 		Target newTarget = new Target(camera.Raycast(camera.AvailableScanRange, Base.VectorToBlockSpace(newPosition, camera)));
-		currentCamera = (currentCamera + 1) % CameraBlocks.Count;
+		currentCamera = (currentCamera + 1) % cameras.Count;
 		lastScan = DateTime.Now;
 		if (newTarget.Id == target.Id) {
 			target.Size = newTarget.Size;
@@ -1257,7 +1253,7 @@ static class Ballistics {
 	static IMyShipController controller = null;
 }
 static class LaserCamera {
-	public static readonly DateTime Version = new DateTime(2023, 03, 30, 20, 06, 00);
+	public static readonly DateTime Version = new DateTime(2023, 04, 01, 17, 51, 00);
 
 
 
@@ -1288,7 +1284,7 @@ static class LaserCamera {
 	}
 	
 	public static string GetGPS() {
-		if (camera == null) return "";
+		if (camera == null) return null;
 		var detectedEntity = camera.Raycast(camera.AvailableScanRange, 0.0f, 0.0f);
 		if (detectedEntity.HitPosition == null) return "";
 		else {
@@ -1301,5 +1297,65 @@ static class LaserCamera {
 
 	//// PRIVATE DATA ////
 	static IMyCameraBlock camera = null;
+}
+static class WeaponSalvo {
+	public static readonly DateTime Version = new DateTime(2023, 04, 01, 17, 11, 00);
+
+
+
+	//// PUBLIC PROPERTIES ////
+	public static double FireRate { // Shots per second
+		get { return 1.0 / weaponFireDelay; }
+		set { weaponFireDelay = 1.0 / value; }
+	}
+	public static int WeaponCount {
+		get { return weapons.Count; }
+	}
+
+
+
+	//// PUBLIC METHODS ////
+	// Remember to call this first
+	public static void Init(MyGridProgram program, HashSet<IMyTerminalBlock> blocks) {
+		program.Echo("Initializing WeaponSalvo");
+		program.Echo("  Version: " + Version.ToString("yy.MM.dd.HH.mm"));
+		
+		weapons = blocks.OfType<IMyUserControllableGun>().ToList();
+		program.Echo("    Weapons: " + weapons.Count);
+		
+		if (weapons.Count > 0) foreach (var weapon in weapons) weapon.Enabled = false;
+	}
+	public static void Update() {
+		if (weapons.Count == 0) return;
+		if (currentWeapon == null || currentWeapon.IsFunctional == false) {
+			NextWeapon();
+			return;
+		}
+		timeFromLastFire += Base.DeltaTime;
+		if (timeFromLastFire < 1.0 / FireRate) return;
+		currentWeapon.Enabled = true;
+		if (currentWeapon.IsShooting) {
+			timeFromLastFire = 0.0;
+			NextWeapon();
+		}
+		else foreach (var weapon in weapons) if (weapon != currentWeapon) weapon.Enabled = false;
+	}
+
+
+
+	//// PRIVATE DATA ////
+	static List<IMyUserControllableGun> weapons = new List<IMyUserControllableGun>();
+	static IMyUserControllableGun currentWeapon = null;
+	static double weaponFireDelay = 1.0;
+	static double timeFromLastFire = 0.0;
+	static int weaponIndex = -1;
+
+
+
+	//// PRIVATE METHODS ////
+	static void NextWeapon() {
+		weaponIndex = (weaponIndex + 1) % weapons.Count;
+		currentWeapon = weapons[weaponIndex];
+	}
 }
 
